@@ -1,4 +1,4 @@
-# AgentDVR — Custom Emgu CV native builds (Linux x64 / arm64 / Windows x64)
+# AgentDVR — Custom Emgu CV native builds (Linux x64 / arm64 / Windows x64 / macOS x64 / macOS ARM64)
 
 This folder builds **Emgu CV's native binary** from source for the platforms AgentDVR ships, with the same module set and CUDA-defensive patches applied to each. The Linux builds use Docker; the Windows build uses native MSVC.
 
