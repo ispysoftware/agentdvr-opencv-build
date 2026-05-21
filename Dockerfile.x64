@@ -1,0 +1,216 @@
+# syntax=docker/dockerfile:1.6
+#
+# Builds Emgu CV's libcvextern.so for linux-x64 on Ubuntu 20.04 (glibc 2.31 floor).
+# The resulting binary loads on Ubuntu 20.04+, Debian 11+, Linux Mint 20+, RHEL 8+, etc.
+# Wider floor than 22.04 — still covers 20.04 LTS users (supported until April 2025).
+#
+# Usage (from this directory):
+#   docker build -f Dockerfile.x64 --output type=local,dest=./out/linux-x64 .
+#
+# Output: ./out/linux-x64/libcvextern.so
+# Build time: 45-90 min on a fast 8-core box; longer on smaller machines.
+
+ARG UBUNTU_VERSION=20.04
+FROM ubuntu:${UBUNTU_VERSION} AS builder
+
+# Tag in the emgucv repo. The NuGet revision .5764 is package-only; the git tag is 4.12.0.
+ARG EMGU_TAG=4.12.0
+# Build profile passed to Emgu's cmake_configure: full | core | mini
+ARG BUILD_TYPE=full
+# Parallel make jobs (default: all cores)
+ARG JOBS=
+# Set to 1 to disable FFmpeg/GStreamer to dodge libavcodec.so version pinning across Ubuntu releases.
+# Recommended ON for portable AgentDVR builds since videoio isn't used.
+ARG PORTABLE=1
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    TZ=Etc/UTC \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
+
+# Stub files used by the PORTABLE patch step (see RUN block lower down).
+COPY patches/ /patches/
+
+# ---- Build dependencies ---------------------------------------------------
+# Mirror of Emgu's platforms/ubuntu/24.04/apt_install_dependency, transposed to 20.04.
+# Differences from 22.04:
+#   libvtk9-dev      -> libvtk7-dev       (vtk9 first appeared in 22.04)
+#   libdc1394-dev    -> libdc1394-22-dev  (renamed in 22.04)
+#   libfreetype-dev  -> libfreetype6-dev  (libfreetype-dev alias added in 22.04)
+# 20.04 ships cmake 3.16 which satisfies OpenCV 4.12 / emgucv's minimum (3.13+).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl wget gnupg lsb-release software-properties-common \
+      git build-essential cmake pkg-config file binutils python3 \
+      libgtk-3-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+      libavcodec-dev libswscale-dev libavformat-dev libdc1394-22-dev libv4l-dev \
+      ocl-icd-dev freeglut3-dev libgeotiff-dev libusb-1.0-0-dev \
+      libvtk7-dev libfreetype6-dev libharfbuzz-dev qtbase5-dev libeigen3-dev \
+      libgflags-dev libgoogle-glog-dev liblapacke-dev libva-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+# dotnet-sdk-8.0 is REQUIRED by Emgu's CMake (FindCSharp emits FATAL_ERROR otherwise),
+# even for a native-only build. On 20.04 it comes from Microsoft's apt feed.
+RUN wget -q https://packages.microsoft.com/config/ubuntu/20.04/packages-microsoft-prod.deb \
+      -O /tmp/ms.deb \
+ && dpkg -i /tmp/ms.deb && rm /tmp/ms.deb \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends dotnet-sdk-8.0 \
+ && rm -rf /var/lib/apt/lists/*
+# Mono deliberately omitted. FindCSharp.cmake checks for `dotnet` first, mono is only a
+# legacy fallback. Skipping it shaves several hundred MB off the build image and keeps the
+# x64 + arm64 Dockerfiles consistent (arm64 specifically can't install mono via QEMU at all
+# due to a segfault in mono-runtime-common's post-install script).
+
+# ---- Source ---------------------------------------------------------------
+WORKDIR /work
+RUN git clone --depth 1 --branch ${EMGU_TAG} https://github.com/emgucv/emgucv.git emgucv
+WORKDIR /work/emgucv
+
+# Pull only the submodules the build needs (skip openvino + depthai which are huge & optional).
+# --depth 1 keeps the per-submodule clone shallow.
+RUN git submodule update --init --depth 1 --recursive -- \
+      opencv \
+      opencv_contrib \
+      opencv_extra \
+      eigen \
+      harfbuzz \
+      hdf5 \
+      vtk \
+      3rdParty/freetype2 \
+      Emgu.CV.Extern/tesseract/libtesseract/tesseract-ocr.git \
+      Emgu.CV.Extern/tesseract/libtesseract/leptonica/leptonica.git
+
+# ---- Configure & build ----------------------------------------------------
+# We run Emgu's stock configure script (platforms/ubuntu/24.04/cmake_configure).
+# It's distro-version-agnostic — only the apt deps differed between 22.04 and 24.04.
+
+WORKDIR /work/emgucv/platforms/ubuntu/24.04
+
+# AgentDVR-minimal build: strip OpenCV to only the modules AgentDVR uses + disable unused features.
+# BUILD_LIST whitelist: core, imgproc, imgcodecs, calib3d, features2d, flann, video, objdetect, tracking, plot.
+# Disables that kill unused runtime .so deps:
+#   FFmpeg / GStreamer / V4L  -> libavcodec.so.X etc are hard-pinned per Ubuntu release
+#   HDF5 / opencv_hdf         -> libhdf5_serial.so.103 dep gone
+#   VTK                       -> libvtk*.so.X deps gone
+#   GDAL / EMGU_CV_WITH_TIFF  -> libgeotiff.so.5 dep gone
+#   TESSERACT / FREETYPE      -> Emgu's vendored builds skipped
+# Variables inside CONTRIB_OPTION, TESSERACT_OPTION, FREETYPE_OPTION are flipped via separate seds
+# because cmake's last-wins rule would otherwise override our injected flags.
+#
+# Emgu bug fix: stitching_c.h and xfeatures2d/nonfree_c.h declare `class Feature2D {};` (empty
+# class DEFINITION) as a stub when their parent module is disabled. This collides with the real
+# `class Feature2D : public Algorithm { ... }` from features2d.hpp when a generated header like
+# vector_CameraParams.h includes both in the same translation unit.
+#
+# Naive fix (delete the stub) fails because Emgu globs wrapper .cpp files unconditionally —
+# nonfree_c.cpp and stitching_c.cpp DO get compiled even when their modules aren't in BUILD_LIST,
+# and they reference cv::Feature2D in function signatures (`cv::Feature2D*` / `cv::Feature2D**`).
+# Delete the stub and those .cpp files fail with "Feature2D has not been declared".
+#
+# Correct fix: substitute the empty-class DEFINITION (`class Feature2D {};`) with a forward
+# DECLARATION (`class Feature2D;`). Forward decls are compatible with the real definition (C++
+# allows forward decl + full def in the same TU), and pointer-typed function signatures only
+# need a forward decl to compile.
+RUN if [ "${PORTABLE}" = "1" ]; then \
+      sed -i 's|-DBUILD_TESTS:BOOL=FALSE|-DBUILD_TESTS:BOOL=FALSE -DBUILD_LIST=core,imgproc,calib3d,features2d,flann,video,objdetect,tracking,plot,bgsegm -DWITH_FFMPEG:BOOL=OFF -DWITH_GSTREAMER:BOOL=OFF -DWITH_V4L:BOOL=OFF -DWITH_LIBV4L:BOOL=OFF -DWITH_HDF5:BOOL=OFF -DWITH_VTK:BOOL=OFF -DWITH_GDAL:BOOL=OFF -DBUILD_opencv_hdf:BOOL=OFF -DEMGU_CV_WITH_TIFF:BOOL=FALSE -DWITH_IPP:BOOL=OFF -DWITH_OPENCL:BOOL=OFF -DWITH_LAPACK:BOOL=OFF -DWITH_TBB:BOOL=OFF -DWITH_QUIRC:BOOL=OFF -DWITH_ITT:BOOL=OFF -DBUILD_IPP_IW:BOOL=OFF -DBUILD_ITT:BOOL=OFF -DCPU_BASELINE=SSE4_2 -DCPU_DISPATCH="AVX,FP16,AVX2,AVX_512F,AVX512_SKX"|' cmake_configure ; \
+      sed -i 's|-DBUILD_PNG:BOOL=TRUE|-DBUILD_PNG:BOOL=FALSE|g; s|-DBUILD_JPEG:BOOL=TRUE|-DBUILD_JPEG:BOOL=FALSE|g; s|-DBUILD_TIFF:BOOL=TRUE|-DBUILD_TIFF:BOOL=FALSE|g; s|-DBUILD_WEBP:BOOL=TRUE|-DBUILD_WEBP:BOOL=FALSE|g; s|-DBUILD_JASPER:BOOL=TRUE|-DBUILD_JASPER:BOOL=FALSE|g; s|-DBUILD_OPENEXR:BOOL=TRUE|-DBUILD_OPENEXR:BOOL=FALSE|g' cmake_configure ; \
+      sed -i 's|-DWITH_VTK:BOOL=TRUE|-DWITH_VTK:BOOL=FALSE|g; s|-DWITH_GSTREAMER:BOOL=TRUE|-DWITH_GSTREAMER:BOOL=FALSE|g' cmake_configure ; \
+      sed -i 's|EMGU_CV_WITH_TESSERACT:BOOL=TRUE|EMGU_CV_WITH_TESSERACT:BOOL=FALSE|g; s|EMGU_CV_WITH_FREETYPE:BOOL=TRUE|EMGU_CV_WITH_FREETYPE:BOOL=FALSE|g' cmake_configure ; \
+      sed -i 's|class Feature2D {};|class Feature2D;|g' /work/emgucv/Emgu.CV.Extern/stitching/stitching_c.h ; \
+      sed -i 's|class Feature2D {};|class Feature2D;|g' /work/emgucv/Emgu.CV.Extern/xfeatures2d/nonfree_c.h ; \
+      \
+      # Overlay the stub core_cuda_c.cpp. Original calls cv::cuda::DeviceInfo ctor which \
+      # CV_Asserts when device count is 0 (which it always is without WITH_CUDA), and that \
+      # assertion fires through the OpenCV error handler → cv::Exception → unhandled native \
+      # exception → SIGABRT. CV_Assert is independent of throw_no_cuda so our earlier patches \
+      # don't catch it. The stub replaces every function with a safe-default returning no-op. \
+      cp /patches/core_cuda_c.cpp.stub /work/emgucv/Emgu.CV.Extern/core/core_cuda_c.cpp ; \
+      echo "Replaced Emgu.CV.Extern/core/core_cuda_c.cpp with safe stub." ; \
+      \
+      # Remove the imgcodecs Emgu wrapper subdir entirely — its imgcodecs_c_extra.cpp \
+      # references cv::Animation which only exists in the (disabled) imgcodecs module. \
+      # No other Emgu wrapper imports imgcodecs headers, and no CREATE_OCV_CLASS_PROPERTY \
+      # call regenerates files in imgcodecs/, so the rm sticks. AgentDVR uses .NET for \
+      # image I/O, not OpenCV. \
+      rm -rf /work/emgucv/Emgu.CV.Extern/imgcodecs ; \
+      \
+      # CUDA defensive patch: cuda* wrapper subdirs stay in place (3 CREATE_OCV_CLASS_PROPERTY \
+      # calls regenerate property files in cuda*/, so rm -rf doesn't work). Instead, patch \
+      # the throw_no_cuda* stub functions to be no-ops. \
+      # \
+      # WHY: when AgentDVR runs with ONNX Runtime's CUDA EP, something in the code path calls \
+      # a cv::cuda::* operation without first checking CudaInvoke.HasCuda. The wrapper then \
+      # calls CV_Error() which throws cv::Exception. .NET on Linux can't reliably propagate \
+      # C++ exceptions through P/Invoke — it crashes the process. \
+      # \
+      # The patch: remove CV_NORETURN attribute and replace the CV_Error body with a no-op. \
+      # Now the stubs return silently instead of throwing. Non-void functions fall off without \
+      # a return statement (UB, returns garbage from the return register), but for AgentDVR's \
+      # use case the offending code path is expected to be guarded by HasCuda anyway — the \
+      # patch is defense-in-depth for the unguarded case so the process doesn't crash. \
+      find /work/emgucv/Emgu.CV.Extern -type d -name 'cuda*' | while read d; do \
+        for h in "$d"/*_c.h; do \
+          [ -f "$h" ] || continue; \
+          sed -i 's|CV_NORETURN ||g; s|CV_Error([^)]*);|/* defensive no-op: see Dockerfile.x64 */;|g' "$h"; \
+        done; \
+      done ; \
+      echo "Patched Emgu cuda throw_no_cuda* stubs to silent no-ops." ; \
+      \
+      # ALSO patch OpenCV's INTERNAL throw_no_cuda() in private.cuda.hpp. This is the one \
+      # actually firing in production: Emgu's core_cuda_c.cpp (cudaSetDevice, cudaGetDevice) \
+      # directly invokes cv::cuda::setDevice / cv::cuda::getDevice in OpenCV core, which call \
+      # this internal throw_no_cuda(). The Emgu layer patch alone doesn't catch this path. \
+      # Both definitions (HAVE_CUDA undef and the HAVE_CUDA-defined fallback) get neutralized. \
+      sed -i 's|CV_NORETURN void throw_no_cuda() { CV_Error([^)]*); }|void throw_no_cuda() { /* defensive no-op */ }|g' \
+        /work/emgucv/opencv/modules/core/include/opencv2/core/private.cuda.hpp ; \
+      echo "Patched OpenCV internal throw_no_cuda() in opencv/modules/core/include/opencv2/core/private.cuda.hpp." ; \
+      \
+      echo "AgentDVR-minimal build: BUILD_LIST applied; unused features disabled; Feature2D stubs forward-decl'd; imgcodecs wrapper removed; cuda throws neutralized." ; \
+    fi
+
+# Run configure (which also kicks off `make`). MAKEFLAGS must be set inside RUN so $(nproc) expands.
+# Tee output so a CI can scrape it.
+RUN if [ -n "${JOBS}" ]; then export MAKEFLAGS="-j${JOBS}"; else export MAKEFLAGS="-j$(nproc)"; fi; \
+    echo "Building with MAKEFLAGS=${MAKEFLAGS}"; \
+    bash ./cmake_configure ${BUILD_TYPE} 2>&1 | tee /tmp/emgu_build.log | tail -200
+
+# ---- Strip + Verify ------------------------------------------------------
+# Expected output path is libs/runtimes/ubuntu-x64/native/ when IS_UBUNTU=TRUE.
+# If lsb-release detection misfires, the .so may land elsewhere under libs/. Find it
+# and relocate to the expected path before strip/verify.
+RUN set -e ; \
+    EXPECTED=/work/emgucv/libs/runtimes/ubuntu-x64/native ; \
+    if [ ! -f "$EXPECTED/libcvextern.so" ]; then \
+      FOUND="$(find /work/emgucv/libs -name libcvextern.so -type f 2>/dev/null | head -1)" ; \
+      if [ -z "$FOUND" ]; then \
+        echo "ERROR: libcvextern.so was not produced anywhere under /work/emgucv/libs" ; \
+        find /work/emgucv -name 'libcvextern*' 2>/dev/null | head ; \
+        tail -200 /tmp/emgu_build.log ; \
+        exit 1 ; \
+      fi ; \
+      echo "NOTE: libcvextern.so was at $FOUND (not expected path $EXPECTED). Relocating." ; \
+      mkdir -p "$EXPECTED" ; \
+      cp -p "$FOUND" "$EXPECTED/libcvextern.so" ; \
+    fi
+WORKDIR /work/emgucv/libs/runtimes/ubuntu-x64/native
+# Aggressive strip: remove ALL non-dynamic symbols + debug info.
+# --strip-all is safe for shared libraries that don't need their static symbol table
+# (which is what AgentDVR ships — runtime only needs the dynamic symbol table).
+RUN echo "=== SIZE BEFORE STRIP ===" && ls -lh libcvextern.so && \
+    strip --strip-all libcvextern.so && \
+    echo "=== SIZE AFTER STRIP ===" && ls -lh libcvextern.so
+RUN file libcvextern.so \
+ && ls -lh libcvextern.so \
+ && echo "=== GLIBC SYMBOLS REQUIRED (max should be <= 2.31) ===" \
+ && nm --dynamic --undefined-only libcvextern.so \
+      | grep -oE 'GLIBC_[0-9.]+' | sort -V | uniq | tail -10 \
+ && echo "=== LDD (missing dependencies should be empty) ===" \
+ && ldd libcvextern.so | grep "not found" || echo "(no missing libs)" \
+ && echo "=== EXPORTED SYMBOL COUNT ===" \
+ && nm --dynamic --defined-only libcvextern.so | wc -l
+
+# ---- Export stage (scratch image holding only the artifact) ---------------
+FROM scratch AS export
+COPY --from=builder /work/emgucv/libs/runtimes/ubuntu-x64/native/libcvextern.so /libcvextern.so
+# Also export the build log for postmortem / verification.
+COPY --from=builder /tmp/emgu_build.log /emgu_build.log

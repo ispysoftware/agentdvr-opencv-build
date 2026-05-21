@@ -1,0 +1,153 @@
+//----------------------------------------------------------------------------
+//  AgentDVR-portable stub replacement for Emgu.CV.Extern/core/core_cuda_c.cpp
+//
+//  WHY THIS EXISTS
+//  ---------------
+//  The original file calls cv::cuda::* APIs directly in every function body.
+//  When OpenCV is built without CUDA support (WITH_CUDA=OFF), some of those
+//  APIs fail in ways that crash .NET on Linux:
+//
+//    * cv::cuda::setDevice / getDevice / resetDevice — throw via throw_no_cuda()
+//      (we patch throw_no_cuda to a no-op, but non-void callers then fall off
+//      without a return statement; non-void UB returns garbage from the register).
+//
+//    * cv::cuda::DeviceInfo constructor — uses CV_Assert(device_id < count),
+//      which is INDEPENDENT of HAVE_CUDA. When count==0 and device_id==0, the
+//      assertion 0<0 is false → CV_Assert throws cv::Exception with the
+//      message "Assertion failed: device_id >= 0 && device_id < ...". That's
+//      what the user is seeing in production after our earlier patches.
+//
+//    * cv::cuda::GpuMat operations — dereference uninitialized pointers when
+//      no device is present.
+//
+//  Native cv::Exception propagating through P/Invoke on Linux .NET is undefined
+//  behavior — typical result is heap corruption (munmap_chunk / free invalid
+//  pointer) followed by SIGABRT / IOT instruction. AgentDVR's managed code
+//  never gets a chance to catch it.
+//
+//  THE FIX
+//  -------
+//  Replace every function in this file with a stub that returns a safe default
+//  and never calls into cv::cuda::* at all. Signatures must match the original
+//  exactly so the exported symbols stay identical (Emgu's managed P/Invoke
+//  declarations are unchanged).
+//
+//  This is only used when PORTABLE=1 (the default in build.ps1 / build.sh).
+//  For a real CUDA-enabled build (PORTABLE=0 + WITH_CUDA=ON), the original
+//  source file is kept.
+//----------------------------------------------------------------------------
+
+#include "core_cuda_c.h"
+#include <cstring>
+
+// ---- Device enumeration ----
+int  cudaGetCudaEnabledDeviceCount() { return 0; }
+void cudaSetDevice(int deviceId)     { (void)deviceId; }
+int  cudaGetDevice()                 { return -1; }
+void cudaResetDevice()               { }
+
+// ---- DeviceInfo lifecycle ----
+cv::cuda::DeviceInfo* cudaDeviceInfoCreate(int* deviceId)
+{
+    // The original would call `new cv::cuda::DeviceInfo(*deviceId)`, whose
+    // constructor CV_Asserts that device_id < getCudaEnabledDeviceCount().
+    // With no devices, that assert fires and crashes the process. Return null
+    // instead — managed callers will get a NullReferenceException at worst,
+    // which is catchable.
+    (void)deviceId;
+    return nullptr;
+}
+
+void cudaDeviceInfoRelease(cv::cuda::DeviceInfo** di)
+{
+    if (di && *di) { delete *di; *di = nullptr; }
+}
+
+void cudaDeviceInfoDeviceName(cv::cuda::DeviceInfo* device, char* name, int maxSizeInBytes)
+{
+    (void)device;
+    if (name && maxSizeInBytes > 0) name[0] = '\0';
+}
+
+void cudaDeviceInfoComputeCapability(cv::cuda::DeviceInfo* device, int* major, int* minor)
+{
+    (void)device;
+    if (major) *major = 0;
+    if (minor) *minor = 0;
+}
+
+int cudaDeviceInfoMultiProcessorCount(cv::cuda::DeviceInfo* device)
+{
+    (void)device;
+    return 0;
+}
+
+void cudaDeviceInfoFreeMemInfo(cv::cuda::DeviceInfo* info, size_t* free)
+{
+    (void)info;
+    if (free) *free = 0;
+}
+
+void cudaDeviceInfoTotalMemInfo(cv::cuda::DeviceInfo* info, size_t* total)
+{
+    (void)info;
+    if (total) *total = 0;
+}
+
+bool cudaDeviceInfoSupports(cv::cuda::DeviceInfo* device, cv::cuda::FeatureSet feature)
+{
+    (void)device; (void)feature;
+    return false;
+}
+
+bool cudaDeviceInfoIsCompatible(cv::cuda::DeviceInfo* device)
+{
+    (void)device;
+    return false;
+}
+
+void cudaPrintCudaDeviceInfo(int device)      { (void)device; }
+void cudaPrintShortCudaDeviceInfo(int device) { (void)device; }
+
+// ---- Target CUDA arch queries ----
+// Original implementations query cv::cuda::TargetArchs internal tables. With
+// no CUDA in the build, these all return false (no arch is supported).
+bool targetArchsBuildWith(cv::cuda::FeatureSet featureSet) { (void)featureSet; return false; }
+bool targetArchsHas(int major, int minor)                  { (void)major; (void)minor; return false; }
+bool targetArchsHasPtx(int major, int minor)               { (void)major; (void)minor; return false; }
+bool targetArchsHasBin(int major, int minor)               { (void)major; (void)minor; return false; }
+bool targetArchsHasEqualOrLessPtx(int major, int minor)    { (void)major; (void)minor; return false; }
+bool targetArchsHasEqualOrGreater(int major, int minor)    { (void)major; (void)minor; return false; }
+bool targetArchsHasEqualOrGreaterPtx(int major, int minor) { (void)major; (void)minor; return false; }
+bool targetArchsHasEqualOrGreaterBin(int major, int minor) { (void)major; (void)minor; return false; }
+
+// ---- GpuMat (GPU-resident matrix) ----
+// All operations return nullptr / safe defaults. With no CUDA, GpuMat allocation
+// would fail or assert anyway; returning null lets managed callers handle it.
+cv::cuda::GpuMat* gpuMatCreateDefault()                                                   { return nullptr; }
+cv::cuda::GpuMat* gpuMatCreateFromData(int, int, int, void*, int)                         { return nullptr; }
+void              gpuMatCreate(cv::cuda::GpuMat*, int, int, int)                           { }
+cv::cuda::GpuMat* gpuMatCreateContinuous(int, int, int)                                    { return nullptr; }
+bool              gpuMatIsContinuous(cv::cuda::GpuMat*)                                    { return false; }
+cv::cuda::GpuMat* gpuMatGetRegion(cv::cuda::GpuMat*, cv::Range*, cv::Range*)               { return nullptr; }
+void              gpuMatRelease(cv::cuda::GpuMat** mat)                                    { if (mat) *mat = nullptr; }
+cv::cuda::GpuMat* gpuMatCreateFromInputArray(cv::_InputArray*)                             { return nullptr; }
+
+void gpuMatGetSize(cv::cuda::GpuMat*, CvSize* size)
+{
+    if (size) { size->width = 0; size->height = 0; }
+}
+
+bool gpuMatIsEmpty(cv::cuda::GpuMat*)        { return true; }
+int  gpuMatGetChannels(cv::cuda::GpuMat*)    { return 0; }
+int  gpuMatGetType(cv::cuda::GpuMat*)        { return 0; }
+int  gpuMatGetDepth(cv::cuda::GpuMat*)       { return 0; }
+
+void gpuMatUpload  (cv::cuda::GpuMat*, cv::_InputArray*,  cv::cuda::Stream*) { }
+void gpuMatDownload(cv::cuda::GpuMat*, cv::_OutputArray*, cv::cuda::Stream*) { }
+void gpuMatConvertTo(const cv::cuda::GpuMat*, cv::_OutputArray*, int, double, double, cv::cuda::Stream*) { }
+void gpuMatCopyTo   (const cv::cuda::GpuMat*, cv::_OutputArray*, const cv::_InputArray*, cv::cuda::Stream*) { }
+void gpuMatSetTo    (cv::cuda::GpuMat*, const CvScalar*, cv::_InputArray*, cv::cuda::Stream*) { }
+void gpuMatReshape  (const cv::cuda::GpuMat*, cv::cuda::GpuMat*, int, int) { }
+
+cv::cuda::GpuMat* gpuMatGetSubRect(const cv::cuda::GpuMat*, CvRect*) { return nullptr; }

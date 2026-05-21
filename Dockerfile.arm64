@@ -1,0 +1,173 @@
+# syntax=docker/dockerfile:1.6
+#
+# Builds Emgu CV's libcvextern.so for linux-arm64 on Debian 11 (Bullseye, glibc 2.31).
+# Output binary loads on Debian 11+, Raspberry Pi OS Bullseye+, Ubuntu 20.04+ arm64, etc.
+# Matches the x64 build's glibc floor for symmetric distro support.
+#
+# We still use Emgu's `platforms/debian/bookworm/cmake_configure` script — Emgu only ships
+# one Debian configure and it's distro-version-agnostic (only the apt deps differ).
+#
+# Usage (on an x64 dev box, requires QEMU + buildx):
+#   docker run --privileged --rm tonistiigi/binfmt --install arm64
+#   docker buildx create --use --name emgucv-arm64 2>/dev/null || true
+#   docker buildx build --platform linux/arm64 -f Dockerfile.arm64 \
+#       --output type=local,dest=./out/linux-arm64 .
+#
+# Usage (on a real arm64 host — much faster):
+#   docker build -f Dockerfile.arm64 --output type=local,dest=./out/linux-arm64 .
+#
+# Output: ./out/linux-arm64/libcvextern.so
+# Build time via QEMU emulation: 2-6 hours. Native arm64 host: ~60-90 min.
+
+FROM --platform=linux/arm64 debian:11 AS builder
+
+ARG EMGU_TAG=4.12.0
+ARG BUILD_TYPE=full
+ARG JOBS=
+ARG PORTABLE=1
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    TZ=Etc/UTC \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
+
+# Stub files used by the PORTABLE patch step (see RUN block lower down).
+COPY patches/ /patches/
+
+# ---- Build dependencies ---------------------------------------------------
+# Mirrors platforms/debian/bookworm/apt_install_dependency, transposed to Bullseye.
+# Differences from Bookworm:
+#   libgtk-4-dev    -> libgtk-3-dev      (GTK4 not in Bullseye main; GTK3 is the Bullseye-era toolkit)
+#   qt6-base-dev    -> qtbase5-dev       (Qt6 not in Bullseye; Qt5 is the Bullseye-era toolkit)
+#   libdc1394-dev   -> libdc1394-22-dev  (renamed in Bookworm)
+#   libfreetype-dev -> libfreetype6-dev  (libfreetype-dev alias added in Bookworm)
+# Bullseye ships cmake 3.18 — sufficient for OpenCV 4.12.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl wget gnupg git lsb-release \
+      build-essential cmake pkg-config file binutils python3 \
+      libtiff-dev libgeotiff-dev libgtk-3-dev libgstreamer1.0-dev \
+      libavcodec-dev libswscale-dev libavformat-dev libopenexr-dev \
+      libdc1394-22-dev libv4l-dev libeigen3-dev libopengl-dev cmake-curses-gui \
+      freeglut3-dev libvtk9-dev qtbase5-dev libusb-1.0-0-dev \
+      libharfbuzz-dev libfreetype6-dev libgflags-dev libgoogle-glog-dev liblapacke-dev \
+ && rm -rf /var/lib/apt/lists/*
+# NOTE: lsb-release is required for Emgu's CheckPlatform.cmake to detect the Debian distro
+# and set IS_DEBIAN=TRUE. Without it, cmake_host_system_information's DISTRIB_ID check fails,
+# the lsb_release fallback never runs, and arch detection lands on the generic "arm64"
+# branch — output goes to libs/arm64/libcvextern.so instead of libs/runtimes/linux-arm64/native/.
+# Mono deliberately omitted from the apt list above. Emgu's FindCSharp.cmake checks for
+# `dotnet` first (which we install below from Microsoft's apt feed); mono is only a legacy
+# fallback for Mono's `mcs` C# compiler / nuget packaging — neither matters for our
+# native-only build. CRITICAL on arm64: under QEMU emulation, mono-runtime-common's
+# post-install script segfaults (QEMU can't emulate Mono's JIT bootstrapping), failing
+# the apt install before cmake even runs.
+
+# dotnet-sdk-8.0 install — Microsoft's apt feed for Debian 11 doesn't ship arm64 dotnet
+# packages, so we use the official dotnet-install.sh script which downloads the
+# architecture-matched tarball directly from Microsoft's CDN. Same script works on x64,
+# arm64, and arm32, picking the right binary based on uname -m.
+RUN wget -q https://dot.net/v1/dotnet-install.sh -O /tmp/dotnet-install.sh \
+ && chmod +x /tmp/dotnet-install.sh \
+ && /tmp/dotnet-install.sh --channel 8.0 --install-dir /usr/share/dotnet \
+ && ln -sf /usr/share/dotnet/dotnet /usr/bin/dotnet \
+ && rm /tmp/dotnet-install.sh \
+ && dotnet --version
+
+# ---- Source ---------------------------------------------------------------
+WORKDIR /work
+RUN git clone --depth 1 --branch ${EMGU_TAG} https://github.com/emgucv/emgucv.git emgucv
+WORKDIR /work/emgucv
+
+RUN git submodule update --init --depth 1 --recursive -- \
+      opencv \
+      opencv_contrib \
+      opencv_extra \
+      eigen \
+      harfbuzz \
+      hdf5 \
+      vtk \
+      3rdParty/freetype2 \
+      Emgu.CV.Extern/tesseract/libtesseract/tesseract-ocr.git \
+      Emgu.CV.Extern/tesseract/libtesseract/leptonica/leptonica.git
+
+# ---- Configure & build ----------------------------------------------------
+WORKDIR /work/emgucv/platforms/debian/bookworm
+
+# AgentDVR-minimal build: same module strip + portability disables as x64.
+# See Dockerfile.x64 for the rationale behind each flag.
+RUN if [ "${PORTABLE}" = "1" ]; then \
+      sed -i 's|-DBUILD_TESTS:BOOL=FALSE|-DBUILD_TESTS:BOOL=FALSE -DBUILD_LIST=core,imgproc,calib3d,features2d,flann,video,objdetect,tracking,plot,bgsegm -DWITH_FFMPEG:BOOL=OFF -DWITH_GSTREAMER:BOOL=OFF -DWITH_V4L:BOOL=OFF -DWITH_LIBV4L:BOOL=OFF -DWITH_HDF5:BOOL=OFF -DWITH_VTK:BOOL=OFF -DWITH_GDAL:BOOL=OFF -DBUILD_opencv_hdf:BOOL=OFF -DEMGU_CV_WITH_TIFF:BOOL=FALSE -DWITH_IPP:BOOL=OFF -DWITH_OPENCL:BOOL=OFF -DWITH_LAPACK:BOOL=OFF -DWITH_TBB:BOOL=OFF -DWITH_QUIRC:BOOL=OFF -DWITH_ITT:BOOL=OFF -DBUILD_IPP_IW:BOOL=OFF -DBUILD_ITT:BOOL=OFF|' cmake_configure ; \
+      sed -i 's|-DBUILD_PNG:BOOL=TRUE|-DBUILD_PNG:BOOL=FALSE|g; s|-DBUILD_JPEG:BOOL=TRUE|-DBUILD_JPEG:BOOL=FALSE|g; s|-DBUILD_TIFF:BOOL=TRUE|-DBUILD_TIFF:BOOL=FALSE|g; s|-DBUILD_WEBP:BOOL=TRUE|-DBUILD_WEBP:BOOL=FALSE|g; s|-DBUILD_JASPER:BOOL=TRUE|-DBUILD_JASPER:BOOL=FALSE|g; s|-DBUILD_OPENEXR:BOOL=TRUE|-DBUILD_OPENEXR:BOOL=FALSE|g' cmake_configure ; \
+      sed -i 's|-DWITH_VTK:BOOL=TRUE|-DWITH_VTK:BOOL=FALSE|g; s|-DWITH_GSTREAMER:BOOL=TRUE|-DWITH_GSTREAMER:BOOL=FALSE|g' cmake_configure ; \
+      sed -i 's|EMGU_CV_WITH_TESSERACT:BOOL=TRUE|EMGU_CV_WITH_TESSERACT:BOOL=FALSE|g; s|EMGU_CV_WITH_FREETYPE:BOOL=TRUE|EMGU_CV_WITH_FREETYPE:BOOL=FALSE|g' cmake_configure ; \
+      echo "AgentDVR-minimal build: BUILD_LIST applied; FFmpeg/GStreamer/V4L/HDF5/VTK/GDAL/GeoTIFF/Tesseract/FreeType disabled." ; \
+      \
+      # Emgu bug fix: convert `class Feature2D {};` stub (empty class def) to a forward decl \
+      # `class Feature2D;` so it (a) doesn't collide with the real Feature2D from features2d.hpp \
+      # when both end up in the same translation unit via vector_CameraParams.h-style generated \
+      # headers, AND (b) still satisfies pointer-typed signatures in nonfree_c.cpp / stitching_c.cpp \
+      # which Emgu globs and compiles unconditionally. See Dockerfile.x64 for the full explanation. \
+      sed -i 's|class Feature2D {};|class Feature2D;|g' /work/emgucv/Emgu.CV.Extern/stitching/stitching_c.h ; \
+      sed -i 's|class Feature2D {};|class Feature2D;|g' /work/emgucv/Emgu.CV.Extern/xfeatures2d/nonfree_c.h ; \
+      # Overlay the stub core_cuda_c.cpp (see Dockerfile.x64 for rationale). \
+      cp /patches/core_cuda_c.cpp.stub /work/emgucv/Emgu.CV.Extern/core/core_cuda_c.cpp ; \
+      echo "Replaced Emgu.CV.Extern/core/core_cuda_c.cpp with safe stub." ; \
+      # Remove imgcodecs wrapper (references cv::Animation), patch cuda throw stubs to no-op. \
+      # See Dockerfile.x64 for the full rationale on the cuda strategy. \
+      rm -rf /work/emgucv/Emgu.CV.Extern/imgcodecs ; \
+      find /work/emgucv/Emgu.CV.Extern -type d -name 'cuda*' | while read d; do \
+        for h in "$d"/*_c.h; do \
+          [ -f "$h" ] || continue; \
+          sed -i 's|CV_NORETURN ||g; s|CV_Error([^)]*);|/* defensive no-op */;|g' "$h"; \
+        done; \
+      done ; \
+      # Also patch OpenCV's INTERNAL throw_no_cuda() — see Dockerfile.x64 for full rationale. \
+      sed -i 's|CV_NORETURN void throw_no_cuda() { CV_Error([^)]*); }|void throw_no_cuda() { /* defensive no-op */ }|g' \
+        /work/emgucv/opencv/modules/core/include/opencv2/core/private.cuda.hpp ; \
+      echo "Patched Feature2D forward decls; removed imgcodecs wrapper; neutralized Emgu + OpenCV-internal cuda throw stubs." ; \
+    fi
+
+# The bookworm configure ends with `cmake --build . --parallel 1 --target package`.
+# Replace --parallel 1 with --parallel $(nproc) and run.
+RUN if [ -n "${JOBS}" ]; then PARALLEL="${JOBS}"; else PARALLEL="$(nproc)"; fi; \
+    sed -i "s|--parallel 1|--parallel ${PARALLEL}|g" cmake_configure; \
+    export MAKEFLAGS="-j${PARALLEL}"; \
+    echo "Building with PARALLEL=${PARALLEL}"; \
+    bash ./cmake_configure ${BUILD_TYPE} 2>&1 | tee /tmp/emgu_build.log | tail -200
+
+# ---- Strip + Verify ------------------------------------------------------
+# Expected output path is libs/runtimes/linux-arm64/native/ when IS_DEBIAN=TRUE.
+# If lsb-release detection misfires (or some other arch-detect quirk), libcvextern.so
+# might land somewhere else under libs/. Find it wherever it is and relocate to the
+# expected path before strip/verify.
+RUN set -e ; \
+    EXPECTED=/work/emgucv/libs/runtimes/linux-arm64/native ; \
+    if [ ! -f "$EXPECTED/libcvextern.so" ]; then \
+      FOUND="$(find /work/emgucv/libs -name libcvextern.so -type f 2>/dev/null | head -1)" ; \
+      if [ -z "$FOUND" ]; then \
+        echo "ERROR: libcvextern.so was not produced anywhere under /work/emgucv/libs" ; \
+        find /work/emgucv -name 'libcvextern*' 2>/dev/null | head ; \
+        tail -200 /tmp/emgu_build.log ; \
+        exit 1 ; \
+      fi ; \
+      echo "NOTE: libcvextern.so was at $FOUND (not expected path $EXPECTED). Relocating." ; \
+      mkdir -p "$EXPECTED" ; \
+      cp -p "$FOUND" "$EXPECTED/libcvextern.so" ; \
+    fi
+WORKDIR /work/emgucv/libs/runtimes/linux-arm64/native
+RUN echo "=== SIZE BEFORE STRIP ===" && ls -lh libcvextern.so && \
+    strip --strip-all libcvextern.so && \
+    echo "=== SIZE AFTER STRIP ===" && ls -lh libcvextern.so
+RUN file libcvextern.so \
+ && ls -lh libcvextern.so \
+ && echo "=== GLIBC SYMBOLS REQUIRED (max should be <= 2.31) ===" \
+ && nm --dynamic --undefined-only libcvextern.so \
+      | grep -oE 'GLIBC_[0-9.]+' | sort -V | uniq | tail -10 \
+ && echo "=== LDD (missing dependencies should be empty) ===" \
+ && ldd libcvextern.so | grep "not found" || echo "(no missing libs)" \
+ && echo "=== EXPORTED SYMBOL COUNT ===" \
+ && nm --dynamic --defined-only libcvextern.so | wc -l
+
+FROM scratch AS export
+COPY --from=builder /work/emgucv/libs/runtimes/linux-arm64/native/libcvextern.so /libcvextern.so
+COPY --from=builder /tmp/emgu_build.log /emgu_build.log
