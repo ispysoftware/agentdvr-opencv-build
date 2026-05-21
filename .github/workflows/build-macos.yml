@@ -11,6 +11,13 @@
 
 name: Build macOS libcvextern
 
+# Default GITHUB_TOKEN has read-only contents. The "Attach to GitHub Release" step at the
+# end of this job uses softprops/action-gh-release which needs to create the release (and
+# upload assets to it), so we grant contents:write here. Other permissions stay at their
+# read-only defaults (least privilege).
+permissions:
+  contents: write
+
 on:
   workflow_dispatch:
     inputs:
