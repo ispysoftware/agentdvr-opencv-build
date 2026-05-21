@@ -67,14 +67,20 @@ jobs:
         id: emgu
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            EMGU_TAG="${{ github.event.inputs.emgu_tag }}"
+            RAW="${{ github.event.inputs.emgu_tag }}"
           elif [ "${{ github.event_name }}" = "push" ]; then
-            EMGU_TAG="${GITHUB_REF#refs/tags/opencv-v}"
+            RAW="${GITHUB_REF#refs/tags/opencv-v}"
           else
-            EMGU_TAG="4.12.0"
+            RAW="4.12.0"
           fi
-          echo "tag=$EMGU_TAG" >> "$GITHUB_OUTPUT"
-          echo "Building Emgu tag: $EMGU_TAG"
+          # Emgu's git tags are X.Y.Z. Their NuGet package versions add a .RRRR build
+          # revision (e.g. 4.12.0.5764) that is NOT a git tag. Extract just the X.Y.Z so
+          # that "opencv-v4.12.0" and "opencv-v4.12.0.5764" both build the right Emgu tag.
+          EMGU_TAG="$(echo "$RAW" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' || echo "$RAW")"
+          echo "tag=$EMGU_TAG"        >> "$GITHUB_OUTPUT"
+          echo "raw_version=$RAW"     >> "$GITHUB_OUTPUT"
+          echo "Tag input:    $RAW"
+          echo "Emgu git tag: $EMGU_TAG"
 
       - name: Cache emgucv source clone
         uses: actions/cache@v4
