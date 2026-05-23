@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# build.sh — Build libcvextern.so for linux-x64 and linux-arm64 via Docker.
+# build.sh — Build libcvextern.so for linux-x64, linux-arm64, and linux-arm via Docker.
 # Linux/WSL/macOS equivalent of build.ps1.
 #
 # Usage:
-#   ./build.sh                       # both
+#   ./build.sh                       # both (x64 + arm64)
 #   ./build.sh x64                   # x64 only
 #   ./build.sh arm64                 # arm64 only
+#   ./build.sh armhf                 # 32-bit ARM (armv7/armhf) only
+#   ./build.sh all                   # x64 + arm64 + armhf
 #   EMGU_TAG=4.12.0 BUILD_TYPE=full ./build.sh
 #   SKIP_ZIP=1 ./build.sh
 
@@ -87,6 +89,37 @@ build_arm64() {
     ok "linux-arm64 build OK: $out/libcvextern.so ($(du -h "$out/libcvextern.so" | cut -f1))"
 }
 
+build_armhf() {
+    section "Building linux-arm (armv7/armhf, Debian 11 base, glibc 2.31 target)"
+    warn "armhf via QEMU typically takes 3-8 hours. A native armhf host is much faster."
+
+    # Skip binfmt install on native arm hosts
+    local host_arch
+    host_arch="$(uname -m)"
+    if [ "$host_arch" != "armv7l" ] && [ "$host_arch" != "armhf" ]; then
+        echo "Installing QEMU binfmt handlers for arm (v7)..."
+        docker run --privileged --rm tonistiigi/binfmt --install arm >/dev/null || warn "binfmt install non-fatal"
+    fi
+
+    if ! docker buildx ls | grep -q '^emgucv-builder'; then
+        docker buildx create --name emgucv-builder --use >/dev/null
+    else
+        docker buildx use emgucv-builder >/dev/null
+    fi
+    docker buildx inspect --bootstrap >/dev/null
+
+    local out="$ABS_OUT/linux-arm"
+    mkdir -p "$out"
+    docker buildx build \
+        --platform linux/arm/v7 \
+        -f Dockerfile.armhf \
+        "${BUILD_ARGS[@]}" \
+        --output "type=local,dest=$out" \
+        .
+    [ -f "$out/libcvextern.so" ] || fail "armhf build did not produce libcvextern.so"
+    ok "linux-arm build OK: $out/libcvextern.so ($(du -h "$out/libcvextern.so" | cut -f1))"
+}
+
 package_zip() {
     local a="$1"
     local dir="$ABS_OUT/linux-$a"
@@ -100,14 +133,17 @@ package_zip() {
 case "$ARCH" in
     x64)   build_x64 ;;
     arm64) build_arm64 ;;
+    armhf) build_armhf ;;
     both)  build_x64; build_arm64 ;;
-    *)     fail "Unknown arch '$ARCH' (expected: x64 | arm64 | both)" ;;
+    all)   build_x64; build_arm64; build_armhf ;;
+    *)     fail "Unknown arch '$ARCH' (expected: x64 | arm64 | armhf | both | all)" ;;
 esac
 
 if [ "$SKIP_ZIP" != "1" ] && command -v zip >/dev/null 2>&1; then
     section "Packaging CDN zips"
-    [ "$ARCH" = "both" ] || [ "$ARCH" = "x64" ]   && package_zip x64
-    [ "$ARCH" = "both" ] || [ "$ARCH" = "arm64" ] && package_zip arm64
+    [[ "$ARCH" = "both" || "$ARCH" = "all" || "$ARCH" = "x64" ]]   && package_zip x64
+    [[ "$ARCH" = "both" || "$ARCH" = "all" || "$ARCH" = "arm64" ]] && package_zip arm64
+    [[ "$ARCH" = "all"  || "$ARCH" = "armhf" ]]                    && package_zip arm
 fi
 
 section "Done"
