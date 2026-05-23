@@ -1,22 +1,22 @@
-# build.ps1 — Build libcvextern.so for linux-x64 and linux-arm64 via Docker.
+# build.ps1 — Build libcvextern.so for linux-x64, linux-arm64, and linux-arm via Docker.
 # Outputs:
 #   ./out/linux-x64/libcvextern.so
 #   ./out/linux-arm64/libcvextern.so
-#   ./out/linux-x64.zip
-#   ./out/linux-arm64.zip
+#   ./out/linux-arm/libcvextern.so
 #
 # Usage:
-#   .\build.ps1                       # builds both x64 and arm64
+#   .\build.ps1                       # prints usage
 #   .\build.ps1 -Arch x64             # x64 only
 #   .\build.ps1 -Arch arm64           # arm64 only (slow via QEMU)
+#   .\build.ps1 -Arch armhf           # 32-bit ARM / armv7 (slow via QEMU)
+#   .\build.ps1 -Arch all             # x64 + arm64 + armhf
 #   .\build.ps1 -EmguTag 4.12.0       # override the emgucv git tag
 #   .\build.ps1 -BuildType core       # override Emgu's build profile (full|core|mini)
-#   .\build.ps1 -SkipZip              # skip producing the .zip files
 
 [CmdletBinding()]
 param(
-    [ValidateSet('both','x64','arm64')]
-    [string]$Arch = 'both',
+    [ValidateSet('both','x64','arm64','armhf','all')]
+    [string]$Arch = '',
 
     [string]$EmguTag = '4.12.0',
 
@@ -25,8 +25,6 @@ param(
 
     [int]$Jobs = 0,
 
-    [switch]$SkipZip,
-
     [switch]$Portable = $true,
 
     [string]$OutDir = './out'
@@ -34,6 +32,32 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+
+if (-not $Arch) {
+    Write-Host ""
+    Write-Host "Usage:  .\build.ps1 -Arch <target> [options]" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "Targets (-Arch):"
+    Write-Host "  x64     linux-x64   (Debian Buster, glibc 2.28)  ~20-35 min"
+    Write-Host "  arm64   linux-arm64 (Debian Buster, glibc 2.28)  ~2-6 h via QEMU"
+    Write-Host "  armhf   linux-arm   (Debian Buster, glibc 2.28)  ~3-8 h via QEMU"
+    Write-Host "  both    x64 + arm64"
+    Write-Host "  all     x64 + arm64 + armhf"
+    Write-Host ""
+    Write-Host "Options:"
+    Write-Host "  -EmguTag   <tag>          Emgu CV git tag           (default: 4.12.0)"
+    Write-Host "  -BuildType full|core|mini Emgu build profile        (default: full)"
+    Write-Host "  -Jobs      <n>            Parallel make jobs        (default: all cores)"
+    Write-Host "  -Portable                 AgentDVR-minimal patches  (default: on)"
+    Write-Host "  -OutDir    <path>         Output directory          (default: ./out)"
+    Write-Host ""
+    Write-Host "Examples:"
+    Write-Host "  .\build.ps1 -Arch x64"
+    Write-Host "  .\build.ps1 -Arch all -EmguTag 4.12.0"
+    Write-Host "  .\build.ps1 -Arch arm64 -Jobs 8"
+    Write-Host ""
+    exit 0
+}
 
 function Write-Section($msg) {
     Write-Host ""
@@ -84,8 +108,8 @@ try {
     }
 
     # ---- Build x64 ----
-    if ($Arch -in @('both','x64')) {
-        Write-Section "Building linux-x64 (Ubuntu 20.04 base, glibc 2.31 target)"
+    if ($Arch -in @('both','x64','all')) {
+        Write-Section "Building linux-x64 (Debian Buster base, glibc 2.28 target)"
         $x64Out = Join-Path $absOut 'linux-x64'
         New-Item -ItemType Directory -Force -Path $x64Out | Out-Null
 
@@ -103,8 +127,8 @@ try {
     }
 
     # ---- Build arm64 ----
-    if ($Arch -in @('both','arm64')) {
-        Write-Section "Building linux-arm64 (Debian 11 base, glibc 2.31 target)"
+    if ($Arch -in @('both','arm64','all')) {
+        Write-Section "Building linux-arm64 (Debian Buster base, glibc 2.28 target)"
         Write-Host "NOTE: arm64 via QEMU emulation typically takes 2-6 hours." -ForegroundColor Yellow
 
         # Ensure QEMU binfmt is installed for emulating arm64 on this host
@@ -140,22 +164,43 @@ try {
         Write-Host "linux-arm64 build OK: $soPath ($([math]::Round((Get-Item $soPath).Length / 1MB, 1)) MB)" -ForegroundColor Green
     }
 
-    # ---- Package ----
-    if (-not $SkipZip) {
-        Write-Section "Packaging CDN zips"
-        foreach ($a in @('x64','arm64')) {
-            if ($Arch -ne 'both' -and $Arch -ne $a) { continue }
-            $dir = Join-Path $absOut "linux-$a"
-            $zip = Join-Path $absOut "linux-$a.zip"
-            if (-not (Test-Path (Join-Path $dir 'libcvextern.so'))) { continue }
-            if (Test-Path $zip) { Remove-Item -Force $zip }
-            Compress-Archive -Path (Join-Path $dir 'libcvextern.so') -DestinationPath $zip
-            Write-Host ("Created {0} ({1:N1} MB)" -f $zip, ((Get-Item $zip).Length / 1MB)) -ForegroundColor Green
+    # ---- Build armhf ----
+    if ($Arch -in @('armhf','all')) {
+        Write-Section "Building linux-arm (armv7/armhf, Debian Buster base, glibc 2.28 target)"
+        Write-Host "NOTE: armhf via QEMU emulation typically takes 3-8 hours." -ForegroundColor Yellow
+
+        Write-Host "Installing QEMU binfmt handlers for arm (no-op if already present)..."
+        docker run --privileged --rm tonistiigi/binfmt --install arm | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "binfmt install returned non-zero. If you're already on arm hardware this is fine."
         }
+
+        $builderName = 'emgucv-builder'
+        $existing = docker buildx ls | Select-String -Pattern $builderName -Quiet
+        if (-not $existing) {
+            docker buildx create --name $builderName --use | Out-Null
+        } else {
+            docker buildx use $builderName | Out-Null
+        }
+        docker buildx inspect --bootstrap | Out-Null
+
+        $armhfOut = Join-Path $absOut 'linux-arm'
+        New-Item -ItemType Directory -Force -Path $armhfOut | Out-Null
+
+        docker buildx build `
+            --platform linux/arm/v7 `
+            -f Dockerfile.armhf `
+            @buildArgs `
+            --output "type=local,dest=$armhfOut" `
+            .
+        if ($LASTEXITCODE -ne 0) { throw "armhf build failed." }
+
+        $soPath = Join-Path $armhfOut 'libcvextern.so'
+        if (-not (Test-Path $soPath)) { throw "Expected $soPath was not produced." }
+        Write-Host "linux-arm build OK: $soPath ($([math]::Round((Get-Item $soPath).Length / 1MB, 1)) MB)" -ForegroundColor Green
     }
 
     Write-Section "Done"
-    Write-Host "Upload the .zip files to https://files.ispyconnect.com/libs/opencv/$EmguTag.5764/ and bump OpenCvVersion in Dependencies.cs."
 }
 finally {
     Pop-Location

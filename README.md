@@ -1,20 +1,21 @@
-# AgentDVR — Custom Emgu CV native builds (Linux x64 / arm64 / Windows x64 / macOS x64 / arm64)
+# AgentDVR — Custom Emgu CV native builds (Linux x64 / arm64 / armhf / Windows x64 / macOS x64 / arm64)
 
 This folder builds **Emgu CV's native binary** from source for the platforms AgentDVR ships, with the same module set and CUDA-defensive patches applied to each. The Linux builds use Docker; the Windows build uses native MSVC.
 
 ## Why this exists
 
-Emgu's `Emgu.CV.runtime.ubuntu-x64` NuGet (4.12.0.5764) is built against glibc 2.38 (Ubuntu 24.04 base), so on Ubuntu 22.04 and older it fails to load with `GLIBC_2.38 not found`. Emgu doesn't publish a version-specific `ubuntu.22.04-x64` Emgu.CV package. Building on a 20.04 base ourselves lowers the glibc floor to 2.31. Same idea for Bullseye-based Pi OS on arm64.
+Emgu's `Emgu.CV.runtime.ubuntu-x64` NuGet (4.12.0.5764) is built against glibc 2.38 (Ubuntu 24.04 base), so on Ubuntu 22.04 and older it fails to load with `GLIBC_2.38 not found`. Emgu doesn't publish a version-specific `ubuntu.22.04-x64` package. Building on a Debian Buster base lowers the glibc floor to **2.28**, which is compatible with Debian 10+, Ubuntu 18.10+, RHEL 8+, and all Raspberry Pi OS Buster images — the same floor as our FFmpeg builds.
 
 Separately, when AgentDVR runs with ONNX Runtime's CUDA execution provider, **Emgu's `cv::cuda::*` wrapper stubs throw `cv::Exception` on Linux even though we're not built with CUDA** — C++ exceptions through P/Invoke on .NET/Linux is undefined behavior and crashes the process. The portable build neutralizes these stubs into no-ops. The same patch goes into the Windows build for consistency.
 
-| Target           | Build tooling          | Floor / target           | Output zip          |
-| ---------------- | ---------------------- | ------------------------ | ------------------- |
-| Linux x64        | Docker (Ubuntu 20.04)  | glibc 2.31               | `linux-x64.zip`     |
-| Linux arm64      | Docker (Debian 11)     | glibc 2.31               | `linux-arm64.zip`   |
-| Windows x64      | Native MSVC (VS 2022)  | Windows 10+ / .NET 8     | `win-x64.zip`       |
-| macOS x64        | Native Xcode CLT       | macOS 11+ (Big Sur)      | `macos-x64.zip`     |
-| macOS arm64      | Native Xcode CLT       | macOS 11+ (Big Sur)      | `macos-arm64.zip`   |
+| Target           | Build tooling                  | Floor / target           | Output                  |
+| ---------------- | ------------------------------ | ------------------------ | ----------------------- |
+| Linux x64        | Docker (Debian 10 Buster)      | glibc 2.28               | `linux-x64/libcvextern.so`   |
+| Linux arm64      | Docker (Debian 10 Buster)      | glibc 2.28               | `linux-arm64/libcvextern.so` |
+| Linux armhf      | Docker (Debian 10 Buster)      | glibc 2.28               | `linux-arm/libcvextern.so`   |
+| Windows x64      | Native MSVC (VS 2022)          | Windows 10+ / .NET 8     | `win-x64/cvextern.dll`  |
+| macOS x64        | Native Xcode CLT               | macOS 11+ (Big Sur)      | `macos-x64/libcvextern.dylib` |
+| macOS arm64      | Native Xcode CLT               | macOS 11+ (Big Sur)      | `macos-arm64/libcvextern.dylib` |
 
 ## Prerequisites
 
@@ -70,27 +71,28 @@ The script cross-compiles between architectures natively (clang supports `-arch 
 
 ### Linux builds via Docker (`build.ps1` / `build.sh`)
 
+Use `build.ps1` on Windows — it runs in the current window and keeps all output visible. `build.sh` is the equivalent for Linux / macOS / WSL.
+
 ```powershell
-# Both Linux archs
+# x64 + arm64 (default)
 .\build.ps1
 
-# x64 only (fast — ~20-35 min on 8 cores)
+# Individual targets
 .\build.ps1 -Arch x64
-
-# arm64 only (slow under QEMU — 2-6 hours, or 60-90 min on a native arm64 host)
 .\build.ps1 -Arch arm64
+.\build.ps1 -Arch armhf   # 32-bit ARM / armv7 (slow via QEMU — 3-8 hours)
+.\build.ps1 -Arch all     # x64 + arm64 + armhf
 
 # Override Emgu git tag / build profile / parallelism
 .\build.ps1 -EmguTag 4.12.0 -BuildType full -Jobs 8
-
-# Skip the .zip packaging step
-.\build.ps1 -SkipZip
 ```
 
 ```bash
-./build.sh              # both Linux archs
-./build.sh x64          # x64 only
-./build.sh arm64        # arm64 only
+./build.sh              # x64 + arm64
+./build.sh x64
+./build.sh arm64
+./build.sh armhf
+./build.sh all          # x64 + arm64 + armhf
 EMGU_TAG=4.12.0 BUILD_TYPE=full JOBS=8 ./build.sh
 ```
 
@@ -108,9 +110,6 @@ EMGU_TAG=4.12.0 BUILD_TYPE=full JOBS=8 ./build.sh
 
 # Disable the AgentDVR-minimal patches (build Emgu's stock "full" set instead)
 .\build-windows.ps1 -Portable:$false
-
-# Skip the .zip packaging step
-.\build-windows.ps1 -SkipZip
 ```
 
 Expected first-run time: 45-90 min on a fast 8-core box. Subsequent runs are much faster — by default the clone goes to `./src` (a subfolder of this directory) and persists across invocations, so the git clone + submodule init steps are skipped and cmake's incremental build cache only rebuilds changed files. Override the workspace location with `-WorkDir`.
@@ -135,6 +134,12 @@ docker buildx create --use --name emgucv-builder 2>/dev/null || true
 docker buildx build --platform linux/arm64 \
     -f Dockerfile.arm64 \
     --output type=local,dest=./out/linux-arm64 .
+
+# armhf
+docker run --privileged --rm tonistiigi/binfmt --install arm
+docker buildx build --platform linux/arm/v7 \
+    -f Dockerfile.armhf \
+    --output type=local,dest=./out/linux-arm .
 ```
 
 ## Verification
@@ -142,38 +147,37 @@ docker buildx build --platform linux/arm64 \
 The Dockerfile already runs `nm` and `ldd` checks before exporting the artifact. To re-verify after extraction:
 
 ```bash
-# Should print no version higher than the target floor
+# Should print no version higher than 2.28
 nm --dynamic --undefined-only ./out/linux-x64/libcvextern.so \
     | grep -oE 'GLIBC_[0-9.]+' | sort -V | uniq | tail
-# Expect max GLIBC_2.31 for both x64 and arm64
+# Expect max GLIBC_2.28 for all three Linux targets (x64, arm64, armhf)
 
 # Should be empty
 ldd ./out/linux-x64/libcvextern.so | grep "not found"
 ```
 
-For arm64 binaries on an x64 box you'll need `aarch64-linux-gnu-nm` and `qemu-aarch64-static` (or just run the check inside the Docker container).
+For arm64 / armhf binaries on an x64 box you'll need `aarch64-linux-gnu-nm` / `arm-linux-gnueabihf-nm` (or just run the check inside the Docker container).
 
-If the glibc floor comes back higher than the target, something in the build is calling a newer libc symbol — check the build log (also exported as `./out/linux-x64/emgu_build.log`) for which dependency pulled it in.
+If the glibc floor comes back higher than 2.28, something in the build is calling a newer libc symbol — check the build log (also exported as `./out/linux-x64/emgu_build.log`) for which dependency pulled it in.
 
 ## Wiring into AgentDVR
 
-The managed `Dependencies.cs` downloader expects:
+The managed `Dependencies.cs` downloader expects the `.so` files at:
 
 ```
-https://files.ispyconnect.com/libs/opencv/<OpenCvVersion>/linux-x64.zip
-https://files.ispyconnect.com/libs/opencv/<OpenCvVersion>/linux-arm64.zip
+https://files.ispyconnect.com/libs/opencv/<OpenCvVersion>/linux-x64/libcvextern.so
+https://files.ispyconnect.com/libs/opencv/<OpenCvVersion>/linux-arm64/libcvextern.so
+https://files.ispyconnect.com/libs/opencv/<OpenCvVersion>/linux-arm/libcvextern.so
 ```
-
-with each zip containing **`libcvextern.so` at the root**. The wrapper packages exactly this layout.
 
 To roll a new version:
 
-1. Build both zips: `./build.ps1` (or `./build.sh`).
-2. Upload `out/linux-x64.zip` and `out/linux-arm64.zip` to the CDN under `libs/opencv/<new-version>/`.
+1. Build all Linux targets: `.\build.ps1 -Arch all` (or `./build.sh all`).
+2. Upload the `.so` files from `out/linux-x64/`, `out/linux-arm64/`, and `out/linux-arm/` to the CDN under `libs/opencv/<new-version>/`.
 3. Bump `const string OpenCvVersion = "..."` in `D:\Projects\agent-service\SharedLogic\Dependencies.cs`.
 4. Existing installs will see the new version, blow away `.opencv_version`, and re-download.
 
-If you ever need a sibling lib alongside `libcvextern.so` (e.g. a custom `libgeotiff.so.5`), drop it into the zip alongside the .so — the install code copies everything to `Statics.AppPath` and the dynamic loader will find it.
+If you ever need a sibling lib alongside `libcvextern.so` (e.g. a custom `libgeotiff.so.5`), upload it to the same CDN path — the install code copies everything in that directory to `Statics.AppPath` and the dynamic loader will find it.
 
 ## Build profile (`-BuildType` / `BUILD_TYPE`)
 
@@ -306,12 +310,15 @@ done
 
 | File                  | Purpose                                                                            |
 | --------------------- | ---------------------------------------------------------------------------------- |
-| `Dockerfile.x64`      | Ubuntu 20.04 Docker build; produces `libs/runtimes/ubuntu-x64/native/libcvextern.so`. |
-| `Dockerfile.arm64`    | Debian 11 (Bullseye) Docker build; produces `libs/runtimes/linux-arm64/native/libcvextern.so`. |
-| `build.ps1`           | Orchestrator for Linux Docker builds. PowerShell.                                  |
-| `build.sh`            | Orchestrator for Linux Docker builds. Bash.                                        |
+| `Dockerfile.x64`      | Debian Buster Docker build for linux-x64; produces `libcvextern.so` (glibc 2.28 floor). |
+| `Dockerfile.arm64`    | Debian Buster Docker build for linux-arm64; produces `libcvextern.so` (glibc 2.28 floor). |
+| `Dockerfile.armhf`    | Debian Buster Docker build for linux-arm (armv7); produces `libcvextern.so` (glibc 2.28 floor). |
+| `build.ps1`           | Orchestrator for Linux Docker builds. PowerShell. Use this on Windows.             |
+| `build.sh`            | Orchestrator for Linux Docker builds. Bash. Use this on Linux / macOS / WSL.       |
 | `build-windows.ps1`   | Orchestrator for the native Windows x64 build (MSVC + cmake). PowerShell.          |
-| `out/`                | Created at build time. Holds extracted `.so` / `.dll` files, build logs, and zip outputs. |
+| `build-macos.sh`      | Orchestrator for macOS x64 and arm64 builds (Xcode CLT + cmake). Bash.             |
+| `patches/`            | Stub files applied during the Docker build (core_cuda_c.cpp safe stub etc.).       |
+| `out/`                | Created at build time. Holds extracted `.so` / `.dll` files and build logs. Gitignored. |
 
 ## CI/CD (future)
 
@@ -321,14 +328,17 @@ The Dockerfiles are CI-friendly:
 # .github/workflows/build-opencv.yml (sketch)
 jobs:
   x64:
-    runs-on: ubuntu-22.04        # any runner; the build host doesn't matter — the Docker base controls glibc floor
+    runs-on: ubuntu-22.04        # any runner; the Docker base (Buster) controls the glibc 2.28 floor, not the host
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
-      - run: docker buildx build --platform linux/amd64 -f Dockerfile.x64 --output type=local,dest=./out .
+      - run: docker buildx build --platform linux/amd64 -f Dockerfile.x64 --output type=local,dest=./out/linux-x64 .
       - uses: actions/upload-artifact@v4
-        with: { name: linux-x64, path: out/libcvextern.so }
+        with: { name: linux-x64, path: out/linux-x64/libcvextern.so }
   arm64:
-    runs-on: ubuntu-22.04-arm   # native arm64 runner
+    runs-on: ubuntu-22.04-arm   # native arm64 runner — 4-10x faster than QEMU
     steps: ...                  # mirror with Dockerfile.arm64
+  armhf:
+    runs-on: ubuntu-22.04       # QEMU emulation (no native armhf runner available)
+    steps: ...                  # mirror with Dockerfile.armhf + tonistiigi/binfmt --install arm
 ```

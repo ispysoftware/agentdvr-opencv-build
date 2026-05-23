@@ -9,7 +9,6 @@
 #   ./build.sh armhf                 # 32-bit ARM (armv7/armhf) only
 #   ./build.sh all                   # x64 + arm64 + armhf
 #   EMGU_TAG=4.12.0 BUILD_TYPE=full ./build.sh
-#   SKIP_ZIP=1 ./build.sh
 
 set -euo pipefail
 
@@ -19,7 +18,6 @@ BUILD_TYPE="${BUILD_TYPE:-full}"
 JOBS="${JOBS:-0}"
 PORTABLE="${PORTABLE:-1}"
 OUT_DIR="${OUT_DIR:-./out}"
-SKIP_ZIP="${SKIP_ZIP:-0}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -45,7 +43,7 @@ BUILD_ARGS=(
 [ "$JOBS" -gt 0 ] && BUILD_ARGS+=( --build-arg "JOBS=$JOBS" )
 
 build_x64() {
-    section "Building linux-x64 (Ubuntu 20.04 base, glibc 2.31 target)"
+    section "Building linux-x64 (Debian Buster base, glibc 2.28 target)"
     local out="$ABS_OUT/linux-x64"
     mkdir -p "$out"
     docker buildx build \
@@ -59,7 +57,7 @@ build_x64() {
 }
 
 build_arm64() {
-    section "Building linux-arm64 (Debian 11 base, glibc 2.31 target)"
+    section "Building linux-arm64 (Debian Buster base, glibc 2.28 target)"
     warn "arm64 via QEMU typically takes 2-6 hours. Native arm64 host is much faster."
 
     # Skip binfmt install on native arm64 hosts
@@ -90,7 +88,7 @@ build_arm64() {
 }
 
 build_armhf() {
-    section "Building linux-arm (armv7/armhf, Debian 11 base, glibc 2.31 target)"
+    section "Building linux-arm (armv7/armhf, Debian Buster base, glibc 2.28 target)"
     warn "armhf via QEMU typically takes 3-8 hours. A native armhf host is much faster."
 
     # Skip binfmt install on native arm hosts
@@ -120,16 +118,6 @@ build_armhf() {
     ok "linux-arm build OK: $out/libcvextern.so ($(du -h "$out/libcvextern.so" | cut -f1))"
 }
 
-package_zip() {
-    local a="$1"
-    local dir="$ABS_OUT/linux-$a"
-    local zip="$ABS_OUT/linux-$a.zip"
-    [ -f "$dir/libcvextern.so" ] || return 0
-    rm -f "$zip"
-    ( cd "$dir" && zip -q "$zip" libcvextern.so )
-    ok "Created $zip ($(du -h "$zip" | cut -f1))"
-}
-
 case "$ARCH" in
     x64)   build_x64 ;;
     arm64) build_arm64 ;;
@@ -139,12 +127,4 @@ case "$ARCH" in
     *)     fail "Unknown arch '$ARCH' (expected: x64 | arm64 | armhf | both | all)" ;;
 esac
 
-if [ "$SKIP_ZIP" != "1" ] && command -v zip >/dev/null 2>&1; then
-    section "Packaging CDN zips"
-    [[ "$ARCH" = "both" || "$ARCH" = "all" || "$ARCH" = "x64" ]]   && package_zip x64
-    [[ "$ARCH" = "both" || "$ARCH" = "all" || "$ARCH" = "arm64" ]] && package_zip arm64
-    [[ "$ARCH" = "all"  || "$ARCH" = "armhf" ]]                    && package_zip arm
-fi
-
 section "Done"
-echo "Upload the .zip files to https://files.ispyconnect.com/libs/opencv/${EMGU_TAG}.5764/ and bump OpenCvVersion in Dependencies.cs."

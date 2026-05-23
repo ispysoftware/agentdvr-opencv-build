@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.6
 #
-# Builds Emgu CV's libcvextern.so for linux-arm64 on Debian 11 (Bullseye, glibc 2.31).
-# Output binary loads on Debian 11+, Raspberry Pi OS Bullseye+, Ubuntu 20.04+ arm64, etc.
+# Builds Emgu CV's libcvextern.so for linux-arm64 on Debian 10 (Buster, glibc 2.28).
+# Output binary loads on Debian 10+, Raspberry Pi OS Buster+, Ubuntu 18.10+ arm64, etc.
 # Matches the x64 build's glibc floor for symmetric distro support.
 #
 # We still use Emgu's `platforms/debian/bookworm/cmake_configure` script — Emgu only ships
@@ -19,7 +19,7 @@
 # Output: ./out/linux-arm64/libcvextern.so
 # Build time via QEMU emulation: 2-6 hours. Native arm64 host: ~60-90 min.
 
-FROM --platform=linux/arm64 debian:11 AS builder
+FROM --platform=linux/arm64 debian:buster AS builder
 
 ARG EMGU_TAG=4.12.0
 ARG BUILD_TYPE=full
@@ -31,24 +31,33 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8
 
+# Fix apt sources — Buster (Debian 10) reached EOL June 2024 and moved to the archive.
+# Disable Valid-Until check because the archived Release files have expired dates.
+RUN printf 'deb http://archive.debian.org/debian buster main\ndeb http://archive.debian.org/debian-security buster/updates main\n' \
+      > /etc/apt/sources.list \
+ && printf 'Acquire::Check-Valid-Until "false";\n' \
+      > /etc/apt/apt.conf.d/99no-check-valid-until
+
 # Stub files used by the PORTABLE patch step (see RUN block lower down).
 COPY patches/ /patches/
 
 # ---- Build dependencies ---------------------------------------------------
-# Mirrors platforms/debian/bookworm/apt_install_dependency, transposed to Bullseye.
+# Mirrors platforms/debian/bookworm/apt_install_dependency, transposed to Buster.
 # Differences from Bookworm:
-#   libgtk-4-dev    -> libgtk-3-dev      (GTK4 not in Bullseye main; GTK3 is the Bullseye-era toolkit)
-#   qt6-base-dev    -> qtbase5-dev       (Qt6 not in Bullseye; Qt5 is the Bullseye-era toolkit)
+#   libgtk-4-dev    -> libgtk-3-dev      (GTK4 not in Buster; GTK3 is the Buster-era toolkit)
+#   qt6-base-dev    -> qtbase5-dev       (Qt6 not in Buster; Qt5 is the Buster-era toolkit)
 #   libdc1394-dev   -> libdc1394-22-dev  (renamed in Bookworm)
 #   libfreetype-dev -> libfreetype6-dev  (libfreetype-dev alias added in Bookworm)
-# Bullseye ships cmake 3.18 — sufficient for OpenCV 4.12.
+#   libvtk9-dev     -> libvtk6-dev       (VTK9 first appeared in Bullseye; Buster ships VTK6)
+#   libopengl-dev   -> libgl1-mesa-dev   (libopengl-dev split not backported to Buster)
+# Buster ships cmake 3.13; EmguCV 4.12 requires 3.16 (upgraded via pip3 below).
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl wget gnupg git lsb-release \
       build-essential cmake pkg-config file binutils python3 \
       libtiff-dev libgeotiff-dev libgtk-3-dev libgstreamer1.0-dev \
       libavcodec-dev libswscale-dev libavformat-dev libopenexr-dev \
-      libdc1394-22-dev libv4l-dev libeigen3-dev libopengl-dev cmake-curses-gui \
-      freeglut3-dev libvtk9-dev qtbase5-dev libusb-1.0-0-dev \
+      libdc1394-22-dev libv4l-dev libeigen3-dev libgl1-mesa-dev cmake-curses-gui \
+      freeglut3-dev libvtk6-dev qtbase5-dev libusb-1.0-0-dev \
       libharfbuzz-dev libfreetype6-dev libgflags-dev libgoogle-glog-dev liblapacke-dev \
  && rm -rf /var/lib/apt/lists/*
 # NOTE: lsb-release is required for Emgu's CheckPlatform.cmake to detect the Debian distro
@@ -72,6 +81,15 @@ RUN wget -q https://dot.net/v1/dotnet-install.sh -O /tmp/dotnet-install.sh \
  && ln -sf /usr/share/dotnet/dotnet /usr/bin/dotnet \
  && rm /tmp/dotnet-install.sh \
  && dotnet --version
+
+# Buster ships cmake 3.13 but EmguCV 4.12 requires cmake >= 3.16.
+# Download cmake 3.28 binary from cmake.org (glibc 2.17 floor — runs fine on Buster).
+# aarch64 binary used here; cmake.org provides native binaries for both x86_64 and aarch64.
+RUN CMAKE_VER=3.28.0 \
+ && wget -q "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/cmake-${CMAKE_VER}-linux-aarch64.tar.gz" \
+ && tar xf cmake-${CMAKE_VER}-linux-aarch64.tar.gz -C /usr/local --strip-components=1 \
+ && rm cmake-${CMAKE_VER}-linux-aarch64.tar.gz \
+ && cmake --version
 
 # ---- Source ---------------------------------------------------------------
 WORKDIR /work
@@ -160,7 +178,7 @@ RUN echo "=== SIZE BEFORE STRIP ===" && ls -lh libcvextern.so && \
     echo "=== SIZE AFTER STRIP ===" && ls -lh libcvextern.so
 RUN file libcvextern.so \
  && ls -lh libcvextern.so \
- && echo "=== GLIBC SYMBOLS REQUIRED (max should be <= 2.31) ===" \
+ && echo "=== GLIBC SYMBOLS REQUIRED (max should be <= 2.28) ===" \
  && nm --dynamic --undefined-only libcvextern.so \
       | grep -oE 'GLIBC_[0-9.]+' | sort -V | uniq | tail -10 \
  && echo "=== LDD (missing dependencies should be empty) ===" \
