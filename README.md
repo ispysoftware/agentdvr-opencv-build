@@ -318,27 +318,81 @@ done
 | `build-windows.ps1`   | Orchestrator for the native Windows x64 build (MSVC + cmake). PowerShell.          |
 | `build-macos.sh`      | Orchestrator for macOS x64 and arm64 builds (Xcode CLT + cmake). Bash.             |
 | `patches/`            | Stub files applied during the Docker build (core_cuda_c.cpp safe stub etc.).       |
-| `out/`                | Created at build time. Holds extracted `.so` / `.dll` files and build logs. Gitignored. |
+| `.github/workflows/build-macos.yml` | GitHub Actions workflow for macOS x64 + arm64 builds. Triggers on `workflow_dispatch` (manual) and `push` on `opencv-v*` tags. |
+| `out/`                | Created at build time. Holds extracted `.so` / `.dll` / `.dylib` files and build logs. Gitignored. |
 
-## CI/CD (future)
+## CI/CD
 
-The Dockerfiles are CI-friendly:
+### macOS — GitHub Actions (`.github/workflows/build-macos.yml`)
+
+The macOS builds run in GitHub Actions on the hosted `macos-14` runner (Apple Silicon / M1). Because clang supports `-arch x86_64` and `-arch arm64` interchangeably, **both architectures build from a single runner** — no Intel Mac needed.
+
+#### Triggers
+
+| Event | When it fires |
+| ----- | ------------- |
+| `workflow_dispatch` | Manual run from the **Actions** tab — you choose the Emgu tag, arch, and patch level |
+| `push` on `opencv-v*` tags | Automatically builds on any tag like `opencv-v4.12.0` or `opencv-v4.12.0.5764` |
+
+The tag step strips the NuGet build revision so `opencv-v4.12.0.5764` correctly checks out the git tag `4.12.0`.
+
+#### Manual run (Actions tab)
+
+1. Go to **Actions → Build macOS libcvextern → Run workflow**.
+2. Fill in the inputs:
+   - **Emgu CV git tag** — e.g. `4.12.0`
+   - **Architecture** — `both` (default), `x64`, or `arm64`
+   - **Apply AgentDVR-minimal patches** — `true` (default) or `false`
+3. Click **Run workflow**. Typical run time is 60–90 min.
+
+#### Tag-triggered run
+
+Push a tag from the format `opencv-v<X.Y.Z>` to trigger automatically:
+
+```bash
+git tag opencv-v4.12.0
+git push origin opencv-v4.12.0
+```
+
+The workflow builds both archs with the default settings (portable patches on) and attaches the two zip files to a GitHub Release for that tag via `softprops/action-gh-release`.
+
+#### Artifacts
+
+After a run completes, two zip files are available under **Actions → the run → Artifacts** (retained 30 days):
+
+| Artifact name | Contents |
+| ------------- | -------- |
+| `macos-x64`   | `out/macos-x64.zip` — `libcvextern.dylib` for Intel Macs |
+| `macos-arm64` | `out/macos-arm64.zip` — `libcvextern.dylib` for Apple Silicon |
+
+On a tag-triggered run these are also attached directly to the GitHub Release, so you can download them without going into the Actions tab.
+
+#### Source caching
+
+The workflow caches the full emgucv source tree (including submodules) under the key `emgucv-src-<tag>-v1` via `actions/cache@v4`. A re-run for the same tag skips the ~1.5 GB clone + submodule init and goes straight to the build step. If you change the submodule set or patches, bump the cache key suffix to `-v2`.
+
+#### Permissions
+
+The workflow grants `contents: write` so `softprops/action-gh-release` can create the release and upload assets. All other permissions remain at their read-only defaults.
+
+#### Linux / Windows CI (future)
+
+The Linux Docker builds and Windows MSVC build don't have a CI workflow yet. When added, the sketch would be:
 
 ```yaml
-# .github/workflows/build-opencv.yml (sketch)
 jobs:
-  x64:
-    runs-on: ubuntu-22.04        # any runner; the Docker base (Buster) controls the glibc 2.28 floor, not the host
+  linux-x64:
+    runs-on: ubuntu-22.04        # Docker base (Buster) controls the glibc 2.28 floor, not the host
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
       - run: docker buildx build --platform linux/amd64 -f Dockerfile.x64 --output type=local,dest=./out/linux-x64 .
       - uses: actions/upload-artifact@v4
         with: { name: linux-x64, path: out/linux-x64/libcvextern.so }
-  arm64:
+  linux-arm64:
     runs-on: ubuntu-22.04-arm   # native arm64 runner — 4-10x faster than QEMU
     steps: ...                  # mirror with Dockerfile.arm64
-  armhf:
+  linux-armhf:
     runs-on: ubuntu-22.04       # QEMU emulation (no native armhf runner available)
     steps: ...                  # mirror with Dockerfile.armhf + tonistiigi/binfmt --install arm
 ```

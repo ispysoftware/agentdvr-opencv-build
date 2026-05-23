@@ -54,15 +54,36 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libharfbuzz-dev libfreetype6-dev libgflags-dev libgoogle-glog-dev liblapacke-dev \
  && rm -rf /var/lib/apt/lists/*
 
-# dotnet-sdk-8.0 — use dotnet-install.sh (same as arm64; Microsoft's Debian feed doesn't
-# carry arm or arm64 dotnet packages; the script picks the right armhf tarball from the CDN).
-# .NET 8 supports linux-arm (armv7 hard-float).
-RUN wget -q https://dot.net/v1/dotnet-install.sh -O /tmp/dotnet-install.sh \
- && chmod +x /tmp/dotnet-install.sh \
- && /tmp/dotnet-install.sh --channel 8.0 --install-dir /usr/share/dotnet \
+# dotnet-sdk-8.0 — download tarball directly from the stable Azure CDN with a pinned version.
+# dotnet-install.sh's "latest channel" resolution hits builds.dotnet.microsoft.com which is
+# unreachable from inside the QEMU armhf container. Pinning a specific version bypasses that
+# lookup entirely and goes straight to the versioned download URL.
+# RID for armhf (armv7 hard-float) in .NET terminology is linux-arm.
+ARG DOTNET_VER=8.0.407
+RUN mkdir -p /usr/share/dotnet \
+ && wget -q "https://dotnetcli.azureedge.net/dotnet/Sdk/${DOTNET_VER}/dotnet-sdk-${DOTNET_VER}-linux-arm.tar.gz" \
+ && tar xzf dotnet-sdk-${DOTNET_VER}-linux-arm.tar.gz -C /usr/share/dotnet \
+ && rm dotnet-sdk-${DOTNET_VER}-linux-arm.tar.gz \
  && ln -sf /usr/share/dotnet/dotnet /usr/bin/dotnet \
- && rm /tmp/dotnet-install.sh \
  && dotnet --version
+
+# Buster ships cmake 3.13 but EmguCV 4.12 requires cmake >= 3.16.
+# cmake.org provides no armhf binary, so build from source via the bootstrap script.
+# bootstrap is architecture-agnostic (only needs an existing C/C++ toolchain + make).
+# Build time: ~20-40 min native; under QEMU adds roughly 1-2 h to the overall job.
+# cmake 3.28 was chosen: same as the arm64/x64 builds, glibc 2.17 floor doesn't apply
+# here because we're building it ourselves inside the Buster container.
+# -DCMAKE_USE_OPENSSL=OFF: avoids needing libssl-dev headers; cmake's built-in file()
+# download (used for FetchContent) still works via wget/curl as a fallback.
+RUN CMAKE_VER=3.28.0 \
+ && wget -q "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/cmake-${CMAKE_VER}.tar.gz" \
+ && tar xf cmake-${CMAKE_VER}.tar.gz \
+ && cd cmake-${CMAKE_VER} \
+ && ./bootstrap --parallel=$(nproc) -- -DCMAKE_USE_OPENSSL=OFF \
+ && make -j$(nproc) \
+ && make install \
+ && cd / && rm -rf cmake-${CMAKE_VER} cmake-${CMAKE_VER}.tar.gz \
+ && cmake --version
 
 # ---- Source ---------------------------------------------------------------
 WORKDIR /work
@@ -80,16 +101,6 @@ RUN git submodule update --init --depth 1 --recursive -- \
       3rdParty/freetype2 \
       Emgu.CV.Extern/tesseract/libtesseract/tesseract-ocr.git \
       Emgu.CV.Extern/tesseract/libtesseract/leptonica/leptonica.git
-
-# Buster ships cmake 3.13 but EmguCV 4.12 requires cmake >= 3.16.
-# PyPI cmake has no armv7l wheel, so we patch cmake_minimum_required down to 3.13.
-# EmguCV 4.12 does not use cmake 3.16-specific commands; the version bump was a
-# project-template update. Versions 3.16–3.99 are replaced; 4.x+ also covered.
-RUN find /work/emgucv -name 'CMakeLists.txt' \
-      -exec sed -i \
-        -e 's/cmake_minimum_required(VERSION 3\.1[6-9]/cmake_minimum_required(VERSION 3.13/g' \
-        -e 's/cmake_minimum_required(VERSION 3\.[2-9][0-9]/cmake_minimum_required(VERSION 3.13/g' \
-        {} \;
 
 # ---- Configure & build ----------------------------------------------------
 WORKDIR /work/emgucv/platforms/debian/bookworm
