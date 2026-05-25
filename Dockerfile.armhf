@@ -50,9 +50,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libtiff-dev libgeotiff-dev libgtk-3-dev libgstreamer1.0-dev \
       libavcodec-dev libswscale-dev libavformat-dev libopenexr-dev \
       libdc1394-22-dev libv4l-dev libeigen3-dev libgl1-mesa-dev cmake-curses-gui \
-      freeglut3-dev libvtk6-dev qtbase5-dev libusb-1.0-0-dev \
+      freeglut3-dev libvtk6-dev qtbase5-dev libusb-1.0-0-dev ccache \
       libharfbuzz-dev libfreetype6-dev libgflags-dev libgoogle-glog-dev liblapacke-dev \
  && rm -rf /var/lib/apt/lists/*
+
+# ccache: prepend /usr/lib/ccache to PATH so cmake auto-uses ccache-wrapped gcc/g++.
+# See Dockerfile.x64 for full rationale. Especially valuable for armhf under QEMU
+# where rebuilds otherwise take 3-8 hours.
+ENV PATH="/usr/lib/ccache:${PATH}" \
+    CCACHE_COMPILERCHECK=content \
+    CCACHE_MAXSIZE=10G \
+    CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime
 
 # dotnet-sdk-8.0 — download tarball directly from the stable Azure CDN with a pinned version.
 # dotnet-install.sh's "latest channel" resolution hits builds.dotnet.microsoft.com which is
@@ -109,7 +117,7 @@ WORKDIR /work/emgucv/platforms/debian/bookworm
 # See Dockerfile.x64 for the rationale behind each flag.
 # Note: no CPU_BASELINE/CPU_DISPATCH override for armhf — let OpenCV autodetect NEON.
 RUN if [ "${PORTABLE}" = "1" ]; then \
-      sed -i 's|-DBUILD_TESTS:BOOL=FALSE|-DBUILD_TESTS:BOOL=FALSE -DBUILD_LIST=core,imgproc,calib3d,features2d,flann,video,objdetect,tracking,plot,bgsegm -DWITH_FFMPEG:BOOL=OFF -DWITH_GSTREAMER:BOOL=OFF -DWITH_V4L:BOOL=OFF -DWITH_LIBV4L:BOOL=OFF -DWITH_HDF5:BOOL=OFF -DWITH_VTK:BOOL=OFF -DWITH_GDAL:BOOL=OFF -DBUILD_opencv_hdf:BOOL=OFF -DEMGU_CV_WITH_TIFF:BOOL=FALSE -DWITH_IPP:BOOL=OFF -DWITH_OPENCL:BOOL=OFF -DWITH_LAPACK:BOOL=OFF -DWITH_TBB:BOOL=OFF -DWITH_QUIRC:BOOL=OFF -DWITH_ITT:BOOL=OFF -DBUILD_IPP_IW:BOOL=OFF -DBUILD_ITT:BOOL=OFF|' cmake_configure ; \
+      sed -i 's|-DBUILD_TESTS:BOOL=FALSE|-DBUILD_TESTS:BOOL=FALSE -DBUILD_LIST=core,imgproc,calib3d,features2d,flann,video,objdetect,tracking,plot,bgsegm -DWITH_FFMPEG:BOOL=OFF -DWITH_GSTREAMER:BOOL=OFF -DWITH_V4L:BOOL=OFF -DWITH_LIBV4L:BOOL=OFF -DWITH_HDF5:BOOL=OFF -DWITH_VTK:BOOL=OFF -DWITH_GDAL:BOOL=OFF -DWITH_TIFF:BOOL=OFF -DWITH_JPEG:BOOL=OFF -DWITH_PNG:BOOL=OFF -DWITH_WEBP:BOOL=OFF -DWITH_OPENEXR:BOOL=OFF -DWITH_JASPER:BOOL=OFF -DWITH_OPENJPEG:BOOL=OFF -DWITH_VA:BOOL=OFF -DWITH_VA_INTEL:BOOL=OFF -DWITH_1394:BOOL=OFF -DWITH_FREETYPE:BOOL=OFF -DWITH_GTK:BOOL=OFF -DWITH_GTK_2_X:BOOL=OFF -DWITH_QT:BOOL=OFF -DWITH_OPENGL:BOOL=OFF -DWITH_PROTOBUF:BOOL=OFF -DWITH_ADE:BOOL=OFF -DWITH_OBSENSOR:BOOL=OFF -DBUILD_opencv_hdf:BOOL=OFF -DEMGU_CV_WITH_TIFF:BOOL=FALSE -DWITH_IPP:BOOL=OFF -DWITH_OPENCL:BOOL=OFF -DWITH_LAPACK:BOOL=OFF -DWITH_TBB:BOOL=OFF -DWITH_QUIRC:BOOL=OFF -DWITH_ITT:BOOL=OFF -DBUILD_IPP_IW:BOOL=OFF -DBUILD_ITT:BOOL=OFF|' cmake_configure ; \
       sed -i 's|-DBUILD_PNG:BOOL=TRUE|-DBUILD_PNG:BOOL=FALSE|g; s|-DBUILD_JPEG:BOOL=TRUE|-DBUILD_JPEG:BOOL=FALSE|g; s|-DBUILD_TIFF:BOOL=TRUE|-DBUILD_TIFF:BOOL=FALSE|g; s|-DBUILD_WEBP:BOOL=TRUE|-DBUILD_WEBP:BOOL=FALSE|g; s|-DBUILD_JASPER:BOOL=TRUE|-DBUILD_JASPER:BOOL=FALSE|g; s|-DBUILD_OPENEXR:BOOL=TRUE|-DBUILD_OPENEXR:BOOL=FALSE|g' cmake_configure ; \
       sed -i 's|-DWITH_VTK:BOOL=TRUE|-DWITH_VTK:BOOL=FALSE|g; s|-DWITH_GSTREAMER:BOOL=TRUE|-DWITH_GSTREAMER:BOOL=FALSE|g' cmake_configure ; \
       sed -i 's|EMGU_CV_WITH_TESSERACT:BOOL=TRUE|EMGU_CV_WITH_TESSERACT:BOOL=FALSE|g; s|EMGU_CV_WITH_FREETYPE:BOOL=TRUE|EMGU_CV_WITH_FREETYPE:BOOL=FALSE|g' cmake_configure ; \
@@ -138,11 +146,19 @@ RUN if [ "${PORTABLE}" = "1" ]; then \
 
 # The bookworm configure ends with `cmake --build . --parallel 1 --target package`.
 # Replace --parallel 1 with --parallel $(nproc) and run.
-RUN if [ -n "${JOBS}" ]; then PARALLEL="${JOBS}"; else PARALLEL="$(nproc)"; fi; \
+#
+# BuildKit cache mount: separate id per arch so caches don't collide. See Dockerfile.x64.
+RUN --mount=type=cache,id=emgucv-ccache-armhf,target=/root/.ccache,sharing=locked \
+    set -o pipefail ; \
+    if [ -n "${JOBS}" ]; then PARALLEL="${JOBS}"; else PARALLEL="$(nproc)"; fi; \
     sed -i "s|--parallel 1|--parallel ${PARALLEL}|g" cmake_configure; \
     export MAKEFLAGS="-j${PARALLEL}"; \
+    echo "=== ccache stats (before build) ===" ; ccache -s ; \
     echo "Building with PARALLEL=${PARALLEL}"; \
-    bash ./cmake_configure ${BUILD_TYPE} 2>&1 | tee /tmp/emgu_build.log | tail -200
+    bash ./cmake_configure ${BUILD_TYPE} 2>&1 | tee /tmp/emgu_build.log | tail -200 ; \
+    BUILD_RC=$? ; \
+    echo "=== ccache stats (after build) ===" ; ccache -s ; \
+    exit $BUILD_RC
 
 # ---- Strip + Verify -------------------------------------------------------
 # Expected output path is libs/runtimes/linux-arm/native/ when IS_DEBIAN=TRUE.
@@ -165,15 +181,42 @@ WORKDIR /work/emgucv/libs/runtimes/linux-arm/native
 RUN echo "=== SIZE BEFORE STRIP ===" && ls -lh libcvextern.so && \
     strip --strip-all libcvextern.so && \
     echo "=== SIZE AFTER STRIP ===" && ls -lh libcvextern.so
-RUN file libcvextern.so \
- && ls -lh libcvextern.so \
- && echo "=== GLIBC SYMBOLS REQUIRED (max should be <= 2.28) ===" \
- && nm --dynamic --undefined-only libcvextern.so \
-      | grep -oE 'GLIBC_[0-9.]+' | sort -V | uniq | tail -10 \
- && echo "=== LDD (missing dependencies should be empty) ===" \
- && ldd libcvextern.so | grep "not found" || echo "(no missing libs)" \
- && echo "=== EXPORTED SYMBOL COUNT ===" \
- && nm --dynamic --defined-only libcvextern.so | wc -l
+RUN set -e ; \
+    file libcvextern.so ; \
+    ls -lh libcvextern.so ; \
+    echo "=== GLIBC SYMBOLS REQUIRED (max should be <= 2.28) ===" ; \
+    MAX_GLIBC="$(nm --dynamic --undefined-only libcvextern.so | grep -oE 'GLIBC_[0-9.]+' | sort -V | uniq | tail -1)" ; \
+    echo "Max GLIBC symbol: ${MAX_GLIBC}" ; \
+    nm --dynamic --undefined-only libcvextern.so | grep -oE 'GLIBC_[0-9.]+' | sort -V | uniq | tail -10 ; \
+    echo "=== NEEDED ENTRIES (must be whitelist-only) ===" ; \
+    readelf -d libcvextern.so | grep NEEDED ; \
+    \
+    # Whitelist of allowed dynamic dependencies — see Dockerfile.x64 for full rationale. \
+    # armhf adds libatomic.so.1 (GCC may emit __atomic_* calls on 32-bit ARM for 64-bit \
+    # atomic ops that lack native instructions) — it's part of libgcc and universally present. \
+    ALLOWED='^(libc\.so\.6|libdl\.so\.2|libm\.so\.6|libpthread\.so\.0|librt\.so\.1|libgcc_s\.so\.1|libstdc\+\+\.so\.6|libz\.so\.1|libatomic\.so\.1)$' ; \
+    UNEXPECTED="$(readelf -d libcvextern.so | awk '/NEEDED/ {gsub(/[\[\]]/,"",$NF); print $NF}' | grep -Ev "${ALLOWED}" || true)" ; \
+    if [ -n "${UNEXPECTED}" ]; then \
+      echo "" ; \
+      echo "!!! ERROR: libcvextern.so has unexpected runtime dependencies:" ; \
+      echo "${UNEXPECTED}" | sed 's/^/    /' ; \
+      echo "" ; \
+      echo "These libs are NOT universally available across all target distros and will" ; \
+      echo "cause 'failed to load libcvextern.so' at runtime on minimal installs." ; \
+      echo "Add the corresponding -DWITH_<NAME>:BOOL=OFF flag to the cmake_configure sed" ; \
+      echo "above and rebuild." ; \
+      exit 1 ; \
+    fi ; \
+    echo "(NEEDED whitelist OK — only portable system libs)" ; \
+    \
+    echo "=== LDD (missing dependencies should be empty) ===" ; \
+    if ldd libcvextern.so | grep "not found" ; then \
+      echo "!!! ERROR: unresolved dependencies above" ; exit 1 ; \
+    else \
+      echo "(no missing libs)" ; \
+    fi ; \
+    echo "=== EXPORTED SYMBOL COUNT ===" ; \
+    nm --dynamic --defined-only libcvextern.so | wc -l
 
 FROM scratch AS export
 COPY --from=builder /work/emgucv/libs/runtimes/linux-arm/native/libcvextern.so /libcvextern.so

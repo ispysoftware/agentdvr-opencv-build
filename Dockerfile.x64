@@ -48,13 +48,26 @@ COPY patches/ /patches/
 # Buster ships cmake 3.13; EmguCV 4.12 requires 3.16 (upgraded via pip3 below).
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl wget gnupg lsb-release \
-      git build-essential cmake pkg-config file binutils python3 \
+      git build-essential cmake pkg-config file binutils python3 ccache \
       libgtk-3-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
       libavcodec-dev libswscale-dev libavformat-dev libdc1394-22-dev libv4l-dev \
       libgl1-mesa-dev freeglut3-dev libgeotiff-dev libusb-1.0-0-dev \
       libvtk6-dev libfreetype6-dev libharfbuzz-dev qtbase5-dev libeigen3-dev \
       libgflags-dev libgoogle-glog-dev liblapacke-dev libva-dev \
  && rm -rf /var/lib/apt/lists/*
+
+# ---- ccache configuration -------------------------------------------------
+# Prepend ccache's compiler symlinks dir to PATH so cmake's auto-detection finds
+# `/usr/lib/ccache/gcc` and `/usr/lib/ccache/g++` first — they transparently wrap
+# the real compiler. CCACHE_COMPILERCHECK=content hashes the compiler binary
+# (default is mtime, which is unreliable across Docker layer rebuilds where the
+# gcc binary's mtime resets even though its content is identical).
+# CCACHE_DIR defaults to /root/.ccache — matches the BuildKit cache mount target
+# in the build RUN below.
+ENV PATH="/usr/lib/ccache:${PATH}" \
+    CCACHE_COMPILERCHECK=content \
+    CCACHE_MAXSIZE=10G \
+    CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime
 
 # dotnet-sdk-8.0 is REQUIRED by Emgu's CMake (FindCSharp emits FATAL_ERROR otherwise),
 # even for a native-only build. Microsoft's Debian apt feed doesn't carry x64 Buster packages,
@@ -106,13 +119,29 @@ RUN git submodule update --init --depth 1 --recursive -- \
 WORKDIR /work/emgucv/platforms/debian/bookworm
 
 # AgentDVR-minimal build: strip OpenCV to only the modules AgentDVR uses + disable unused features.
-# BUILD_LIST whitelist: core, imgproc, imgcodecs, calib3d, features2d, flann, video, objdetect, tracking, plot.
+# BUILD_LIST whitelist: core, imgproc, calib3d, features2d, flann, video, objdetect, tracking, plot, bgsegm.
+#
+# CRITICAL: WITH_*=OFF flags below are what actually prevent unwanted runtime .so dependencies.
+# BUILD_*=FALSE only controls whether OpenCV builds its bundled copy of a 3rd-party lib;
+# without WITH_*=OFF the build will auto-detect and dynamically link the system version,
+# which is how libtiff.so.5 / libva.so.2 deps crept in previously (broke on Ubuntu 24.04
+# which ships libtiff6 instead of libtiff5). Goal: libcvextern.so depends ONLY on libc,
+# libstdc++, libgcc_s, libm, libpthread, librt, libdl, libz (all universal across distros).
+#
 # Disables that kill unused runtime .so deps:
-#   FFmpeg / GStreamer / V4L  -> libavcodec.so.X etc are hard-pinned per Ubuntu release
-#   HDF5 / opencv_hdf         -> libhdf5_serial.so.103 dep gone
-#   VTK                       -> libvtk*.so.X deps gone
-#   GDAL / EMGU_CV_WITH_TIFF  -> libgeotiff.so.5 dep gone
-#   TESSERACT / FREETYPE      -> Emgu's vendored builds skipped
+#   FFmpeg / GStreamer / V4L            -> libavcodec.so.X etc, hard-pinned per Ubuntu release
+#   HDF5 / opencv_hdf                   -> libhdf5_serial.so.103 dep gone
+#   VTK                                 -> libvtk*.so.X deps gone
+#   GDAL / TIFF / EMGU_CV_WITH_TIFF     -> libgeotiff.so.5, libtiff.so.5 deps gone
+#   JPEG / PNG / WEBP / OPENEXR / JASPER / OPENJPEG -> all imgcodecs format libs (module disabled anyway)
+#   VA / VA_INTEL                       -> libva.so.2, libva-drm.so.2 deps gone
+#   1394                                -> libdc1394 dep gone
+#   FREETYPE / harfbuzz                 -> libfreetype.so, libharfbuzz.so deps gone
+#   GTK / QT / OPENGL                   -> no highgui module anyway
+#   PROTOBUF                            -> DNN module isn't built; no libprotobuf dep
+#   ADE                                 -> gapi module isn't built
+#   OBSENSOR                            -> Orbbec videoio backend (videoio not built)
+#   TESSERACT / FREETYPE                -> Emgu's vendored builds skipped
 # Variables inside CONTRIB_OPTION, TESSERACT_OPTION, FREETYPE_OPTION are flipped via separate seds
 # because cmake's last-wins rule would otherwise override our injected flags.
 #
@@ -131,7 +160,7 @@ WORKDIR /work/emgucv/platforms/debian/bookworm
 # allows forward decl + full def in the same TU), and pointer-typed function signatures only
 # need a forward decl to compile.
 RUN if [ "${PORTABLE}" = "1" ]; then \
-      sed -i 's|-DBUILD_TESTS:BOOL=FALSE|-DBUILD_TESTS:BOOL=FALSE -DBUILD_LIST=core,imgproc,calib3d,features2d,flann,video,objdetect,tracking,plot,bgsegm -DWITH_FFMPEG:BOOL=OFF -DWITH_GSTREAMER:BOOL=OFF -DWITH_V4L:BOOL=OFF -DWITH_LIBV4L:BOOL=OFF -DWITH_HDF5:BOOL=OFF -DWITH_VTK:BOOL=OFF -DWITH_GDAL:BOOL=OFF -DBUILD_opencv_hdf:BOOL=OFF -DEMGU_CV_WITH_TIFF:BOOL=FALSE -DWITH_IPP:BOOL=OFF -DWITH_OPENCL:BOOL=OFF -DWITH_LAPACK:BOOL=OFF -DWITH_TBB:BOOL=OFF -DWITH_QUIRC:BOOL=OFF -DWITH_ITT:BOOL=OFF -DBUILD_IPP_IW:BOOL=OFF -DBUILD_ITT:BOOL=OFF -DCPU_BASELINE=SSE4_2 -DCPU_DISPATCH="AVX,FP16,AVX2,AVX_512F,AVX512_SKX"|' cmake_configure ; \
+      sed -i 's|-DBUILD_TESTS:BOOL=FALSE|-DBUILD_TESTS:BOOL=FALSE -DBUILD_LIST=core,imgproc,calib3d,features2d,flann,video,objdetect,tracking,plot,bgsegm -DWITH_FFMPEG:BOOL=OFF -DWITH_GSTREAMER:BOOL=OFF -DWITH_V4L:BOOL=OFF -DWITH_LIBV4L:BOOL=OFF -DWITH_HDF5:BOOL=OFF -DWITH_VTK:BOOL=OFF -DWITH_GDAL:BOOL=OFF -DWITH_TIFF:BOOL=OFF -DWITH_JPEG:BOOL=OFF -DWITH_PNG:BOOL=OFF -DWITH_WEBP:BOOL=OFF -DWITH_OPENEXR:BOOL=OFF -DWITH_JASPER:BOOL=OFF -DWITH_OPENJPEG:BOOL=OFF -DWITH_VA:BOOL=OFF -DWITH_VA_INTEL:BOOL=OFF -DWITH_1394:BOOL=OFF -DWITH_FREETYPE:BOOL=OFF -DWITH_GTK:BOOL=OFF -DWITH_GTK_2_X:BOOL=OFF -DWITH_QT:BOOL=OFF -DWITH_OPENGL:BOOL=OFF -DWITH_PROTOBUF:BOOL=OFF -DWITH_ADE:BOOL=OFF -DWITH_OBSENSOR:BOOL=OFF -DBUILD_opencv_hdf:BOOL=OFF -DEMGU_CV_WITH_TIFF:BOOL=FALSE -DWITH_IPP:BOOL=OFF -DWITH_OPENCL:BOOL=OFF -DWITH_LAPACK:BOOL=OFF -DWITH_TBB:BOOL=OFF -DWITH_QUIRC:BOOL=OFF -DWITH_ITT:BOOL=OFF -DBUILD_IPP_IW:BOOL=OFF -DBUILD_ITT:BOOL=OFF -DCPU_BASELINE=SSE4_2 -DCPU_DISPATCH="AVX,FP16,AVX2,AVX_512F,AVX512_SKX"|' cmake_configure ; \
       sed -i 's|-DBUILD_PNG:BOOL=TRUE|-DBUILD_PNG:BOOL=FALSE|g; s|-DBUILD_JPEG:BOOL=TRUE|-DBUILD_JPEG:BOOL=FALSE|g; s|-DBUILD_TIFF:BOOL=TRUE|-DBUILD_TIFF:BOOL=FALSE|g; s|-DBUILD_WEBP:BOOL=TRUE|-DBUILD_WEBP:BOOL=FALSE|g; s|-DBUILD_JASPER:BOOL=TRUE|-DBUILD_JASPER:BOOL=FALSE|g; s|-DBUILD_OPENEXR:BOOL=TRUE|-DBUILD_OPENEXR:BOOL=FALSE|g' cmake_configure ; \
       sed -i 's|-DWITH_VTK:BOOL=TRUE|-DWITH_VTK:BOOL=FALSE|g; s|-DWITH_GSTREAMER:BOOL=TRUE|-DWITH_GSTREAMER:BOOL=FALSE|g' cmake_configure ; \
       sed -i 's|EMGU_CV_WITH_TESSERACT:BOOL=TRUE|EMGU_CV_WITH_TESSERACT:BOOL=FALSE|g; s|EMGU_CV_WITH_FREETYPE:BOOL=TRUE|EMGU_CV_WITH_FREETYPE:BOOL=FALSE|g' cmake_configure ; \
@@ -189,11 +218,23 @@ RUN if [ "${PORTABLE}" = "1" ]; then \
 
 # Run configure (which also kicks off `make`). MAKEFLAGS must be set inside RUN so $(nproc) expands.
 # Tee output so a CI can scrape it.
-RUN if [ -n "${JOBS}" ]; then PARALLEL="${JOBS}"; else PARALLEL="$(nproc)"; fi; \
+#
+# BuildKit cache mount: persists ccache across `docker buildx build` invocations.
+# `id=` namespaces the cache so x64/arm64/armhf don't collide (different ABIs).
+# `sharing=locked` serializes concurrent writes to the same cache. First build is
+# full-cost; subsequent builds of unchanged sources are ~5-10 min instead of 30+.
+# Cache survives until `docker buildx prune` is run.
+RUN --mount=type=cache,id=emgucv-ccache-x64,target=/root/.ccache,sharing=locked \
+    set -o pipefail ; \
+    if [ -n "${JOBS}" ]; then PARALLEL="${JOBS}"; else PARALLEL="$(nproc)"; fi; \
     sed -i "s|--parallel 1|--parallel ${PARALLEL}|g" cmake_configure; \
     export MAKEFLAGS="-j${PARALLEL}"; \
+    echo "=== ccache stats (before build) ===" ; ccache -s ; \
     echo "Building with PARALLEL=${PARALLEL}"; \
-    bash ./cmake_configure ${BUILD_TYPE} 2>&1 | tee /tmp/emgu_build.log | tail -200
+    bash ./cmake_configure ${BUILD_TYPE} 2>&1 | tee /tmp/emgu_build.log | tail -200 ; \
+    BUILD_RC=$? ; \
+    echo "=== ccache stats (after build) ===" ; ccache -s ; \
+    exit $BUILD_RC
 
 # ---- Strip + Verify ------------------------------------------------------
 # Expected output path is libs/runtimes/linux-x64/native/ when IS_DEBIAN=TRUE.
@@ -220,15 +261,43 @@ WORKDIR /work/emgucv/libs/runtimes/linux-x64/native
 RUN echo "=== SIZE BEFORE STRIP ===" && ls -lh libcvextern.so && \
     strip --strip-all libcvextern.so && \
     echo "=== SIZE AFTER STRIP ===" && ls -lh libcvextern.so
-RUN file libcvextern.so \
- && ls -lh libcvextern.so \
- && echo "=== GLIBC SYMBOLS REQUIRED (max should be <= 2.28) ===" \
- && nm --dynamic --undefined-only libcvextern.so \
-      | grep -oE 'GLIBC_[0-9.]+' | sort -V | uniq | tail -10 \
- && echo "=== LDD (missing dependencies should be empty) ===" \
- && ldd libcvextern.so | grep "not found" || echo "(no missing libs)" \
- && echo "=== EXPORTED SYMBOL COUNT ===" \
- && nm --dynamic --defined-only libcvextern.so | wc -l
+RUN set -e ; \
+    file libcvextern.so ; \
+    ls -lh libcvextern.so ; \
+    echo "=== GLIBC SYMBOLS REQUIRED (max should be <= 2.28) ===" ; \
+    MAX_GLIBC="$(nm --dynamic --undefined-only libcvextern.so | grep -oE 'GLIBC_[0-9.]+' | sort -V | uniq | tail -1)" ; \
+    echo "Max GLIBC symbol: ${MAX_GLIBC}" ; \
+    nm --dynamic --undefined-only libcvextern.so | grep -oE 'GLIBC_[0-9.]+' | sort -V | uniq | tail -10 ; \
+    echo "=== NEEDED ENTRIES (must be whitelist-only) ===" ; \
+    readelf -d libcvextern.so | grep NEEDED ; \
+    \
+    # Whitelist of allowed dynamic dependencies. These are universally present on every \
+    # Linux distribution (glibc base + libstdc++ + zlib). Any NEEDED entry outside this \
+    # list means the build picked up an unintended system library (e.g. libtiff5 from \
+    # libgeotiff-dev) — that breaks portability across distro versions. \
+    ALLOWED='^(libc\.so\.6|libdl\.so\.2|libm\.so\.6|libpthread\.so\.0|librt\.so\.1|libgcc_s\.so\.1|libstdc\+\+\.so\.6|libz\.so\.1)$' ; \
+    UNEXPECTED="$(readelf -d libcvextern.so | awk '/NEEDED/ {gsub(/[\[\]]/,"",$NF); print $NF}' | grep -Ev "${ALLOWED}" || true)" ; \
+    if [ -n "${UNEXPECTED}" ]; then \
+      echo "" ; \
+      echo "!!! ERROR: libcvextern.so has unexpected runtime dependencies:" ; \
+      echo "${UNEXPECTED}" | sed 's/^/    /' ; \
+      echo "" ; \
+      echo "These libs are NOT universally available across all target distros and will" ; \
+      echo "cause 'failed to load libcvextern.so' at runtime on minimal installs." ; \
+      echo "Add the corresponding -DWITH_<NAME>:BOOL=OFF flag to the cmake_configure sed" ; \
+      echo "above and rebuild. See the libtiff5 → Ubuntu 24.04 regression for context." ; \
+      exit 1 ; \
+    fi ; \
+    echo "(NEEDED whitelist OK — only portable system libs)" ; \
+    \
+    echo "=== LDD (missing dependencies should be empty) ===" ; \
+    if ldd libcvextern.so | grep "not found" ; then \
+      echo "!!! ERROR: unresolved dependencies above" ; exit 1 ; \
+    else \
+      echo "(no missing libs)" ; \
+    fi ; \
+    echo "=== EXPORTED SYMBOL COUNT ===" ; \
+    nm --dynamic --defined-only libcvextern.so | wc -l
 
 # ---- Export stage (scratch image holding only the artifact) ---------------
 FROM scratch AS export

@@ -1,0 +1,171 @@
+# Build libcvextern.so for linux-arm64 and linux-arm (armhf/armv7) on GitHub's
+# free ARM hosted runners. Avoids QEMU emulation entirely — arm64 builds run
+# natively on the runner's ARM CPU, and armhf builds run via the CPU's aarch32
+# user-mode execution support (also native, no emulation).
+#
+# Typical run time:
+#   arm64  ~45-75 min  (vs 2-6 h via QEMU on x64)
+#   armhf  ~60-90 min  (vs 3-8 h via QEMU on x64)
+#
+# Triggers:
+#   * workflow_dispatch -- manual run from the Actions tab.
+#   * push -- on tags matching opencv-v*.
+#
+# Runner: ubuntu-22.04-arm  (free for public repos; 2000 min/mo free for private).
+# Mirrors the layout of build-macos.yml — see that file for the cache and tag patterns.
+
+name: Build Linux ARM libcvextern
+
+permissions:
+  contents: write   # softprops/action-gh-release needs this on tag push
+
+on:
+  workflow_dispatch:
+    inputs:
+      emgu_tag:
+        description: 'Emgu CV git tag to build'
+        required: true
+        default: '4.12.0'
+      arch:
+        description: 'Architecture'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - arm64
+          - armhf
+      portable:
+        description: 'Apply AgentDVR-minimal patches (BUILD_LIST + CUDA stubs + size cuts)'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+  push:
+    tags:
+      - 'opencv-v*'
+
+jobs:
+  # Compute the Emgu tag once so both arch jobs use the same value.
+  # Strips any .NNNN NuGet revision suffix (e.g. 4.12.0.5764 -> 4.12.0).
+  resolve-tag:
+    runs-on: ubuntu-22.04-arm
+    outputs:
+      emgu_tag: ${{ steps.emgu.outputs.tag }}
+    steps:
+      - id: emgu
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            RAW="${{ github.event.inputs.emgu_tag }}"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            RAW="${GITHUB_REF#refs/tags/opencv-v}"
+          else
+            RAW="4.12.0"
+          fi
+          EMGU_TAG="$(echo "$RAW" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' || echo "$RAW")"
+          echo "tag=$EMGU_TAG" >> "$GITHUB_OUTPUT"
+          echo "Resolved Emgu tag: $EMGU_TAG"
+
+  build:
+    needs: resolve-tag
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 240   # 4 hours hard limit; typical run is 45-90 min per arch.
+
+    strategy:
+      fail-fast: false   # one arch failing shouldn't kill the other
+      matrix:
+        include:
+          - arch: arm64
+            dockerfile: Dockerfile.arm64
+            platform: linux/arm64
+            outdir: linux-arm64
+            enabled: ${{ github.event.inputs.arch == 'both' || github.event.inputs.arch == 'arm64' || github.event_name == 'push' }}
+          - arch: armhf
+            dockerfile: Dockerfile.armhf
+            platform: linux/arm/v7
+            outdir: linux-arm
+            enabled: ${{ github.event.inputs.arch == 'both' || github.event.inputs.arch == 'armhf' || github.event_name == 'push' }}
+
+    steps:
+      - name: Skip if arch disabled
+        if: ${{ matrix.enabled != true && matrix.enabled != 'true' }}
+        run: |
+          echo "Arch ${{ matrix.arch }} not selected for this run — skipping."
+          exit 0
+
+      - name: Checkout repo
+        if: ${{ matrix.enabled == true || matrix.enabled == 'true' }}
+        uses: actions/checkout@v4
+
+      # binfmt registration is needed for armhf (the runner is arm64; aarch32 user
+      # mode usually works natively but the binfmt handlers must still be registered
+      # so Docker knows which interpreter to use for linux/arm/v7 images).
+      # For pure arm64 builds this is a near-instant no-op.
+      - name: Set up QEMU / binfmt
+        if: ${{ matrix.enabled == true || matrix.enabled == 'true' }}
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm,arm64
+
+      - name: Set up Docker Buildx
+        if: ${{ matrix.enabled == true || matrix.enabled == 'true' }}
+        uses: docker/setup-buildx-action@v3
+
+      # Build via docker buildx. cache-from/cache-to with type=gha persists the
+      # BuildKit cache — including our --mount=type=cache,id=emgucv-ccache-* mounts
+      # set up in the Dockerfile — across workflow runs. `scope` keeps the two
+      # arches' caches separate (different ABIs, non-shareable cached objects).
+      # `mode=max` caches intermediate layers in addition to the final result.
+      - name: Build libcvextern.so (${{ matrix.arch }})
+        if: ${{ matrix.enabled == true || matrix.enabled == 'true' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            EMGU_TAG=${{ needs.resolve-tag.outputs.emgu_tag }}
+            BUILD_TYPE=full
+            PORTABLE=${{ github.event.inputs.portable == 'false' && '0' || '1' }}
+          outputs: type=local,dest=./out/${{ matrix.outdir }}
+          cache-from: type=gha,scope=emgucv-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=emgucv-${{ matrix.arch }}
+
+      - name: Show output details
+        if: ${{ matrix.enabled == true || matrix.enabled == 'true' }}
+        run: |
+          SO=./out/${{ matrix.outdir }}/libcvextern.so
+          if [ ! -f "$SO" ]; then
+            echo "ERROR: $SO was not produced"
+            ls -la ./out/ ./out/${{ matrix.outdir }}/ 2>/dev/null || true
+            exit 1
+          fi
+          echo "=== file ==="; file "$SO"
+          echo "=== size ==="; du -h "$SO"
+          echo "=== readelf -d (NEEDED) ==="; readelf -d "$SO" | grep NEEDED
+          echo "=== ldd ==="; ldd "$SO" || true
+
+      - name: Zip artifact
+        if: ${{ matrix.enabled == true || matrix.enabled == 'true' }}
+        run: |
+          cd ./out/${{ matrix.outdir }}
+          zip -9 ../${{ matrix.outdir }}.zip libcvextern.so emgu_build.log 2>/dev/null || zip -9 ../${{ matrix.outdir }}.zip libcvextern.so
+          ls -lh ../${{ matrix.outdir }}.zip
+
+      - name: Upload artifact
+        if: ${{ matrix.enabled == true || matrix.enabled == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.outdir }}
+          path: out/${{ matrix.outdir }}.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach to GitHub Release (on tag push only)
+        if: ${{ (matrix.enabled == true || matrix.enabled == 'true') && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/opencv-v') }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/${{ matrix.outdir }}.zip
+          fail_on_unmatched_files: false

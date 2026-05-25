@@ -79,8 +79,8 @@ Use `build.ps1` on Windows — it runs in the current window and keeps all outpu
 
 # Individual targets
 .\build.ps1 -Arch x64
-.\build.ps1 -Arch arm64
-.\build.ps1 -Arch armhf   # 32-bit ARM / armv7 (slow via QEMU — 3-8 hours)
+.\build.ps1 -Arch arm64   # slow via QEMU on x64 host — 2-6 hours. See "ARM via CI" below.
+.\build.ps1 -Arch armhf   # 32-bit ARM / armv7 — slow via QEMU on x64 host (3-8 hours)
 .\build.ps1 -Arch all     # x64 + arm64 + armhf
 
 # Override Emgu git tag / build profile / parallelism
@@ -95,6 +95,21 @@ Use `build.ps1` on Windows — it runs in the current window and keeps all outpu
 ./build.sh all          # x64 + arm64 + armhf
 EMGU_TAG=4.12.0 BUILD_TYPE=full JOBS=8 ./build.sh
 ```
+
+### ARM builds via GitHub Actions (fast — no QEMU)
+
+Building arm64/armhf via QEMU on an x64 host is slow (2-8 hours). The repo includes a
+GitHub Actions workflow that runs the builds on GitHub's free ARM hosted runners
+where arm64 is fully native (~45-75 min) and armhf runs via the ARM CPU's aarch32
+user mode (~60-90 min) — no emulation in either case.
+
+Trigger manually from the **Actions** tab (`Build Linux ARM libcvextern` →
+`Run workflow`), or push a tag matching `opencv-v*` to build + attach to a release.
+Artifacts are downloadable from the workflow run page for 30 days.
+
+The workflow uses BuildKit's GitHub Actions cache (`type=gha`) to persist the ccache
+data set up in the Dockerfiles, so subsequent runs that don't touch source rebuild
+in 5-15 min per arch.
 
 ### Windows x64 build via native MSVC (`build-windows.ps1`)
 
