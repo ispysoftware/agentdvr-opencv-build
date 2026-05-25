@@ -363,28 +363,21 @@ build_arch() {
     # only exist if the user has Homebrew installed at the same prefix.
     #
     # Allowed:
-    #   /usr/lib/lib{System,c++,objc,z}.* — base macOS, present on every install
-    #   /System/Library/Frameworks/*       — built-in Apple frameworks
+    #   /usr/lib/lib{System,c++,objc,z,iconv,resolv}.* — base macOS, present on every install
+    #   /System/Library/{Frameworks,PrivateFrameworks}/* — built-in Apple frameworks
     #   @rpath / @loader_path / @executable_path — relocatable refs (self-ref typically)
     echo "Verify load commands (otool -L whitelist):"
     otool -L "$dylib"
-    local unexpected_deps
-    unexpected_deps="$(otool -L "$dylib" | tail -n +2 | awk '{print $1}' | while read -r dep; do
-        case "$dep" in
-            /usr/lib/libSystem.B.dylib) ;;
-            /usr/lib/libc++.1.dylib) ;;
-            /usr/lib/libc++abi.dylib) ;;
-            /usr/lib/libobjc.A.dylib) ;;
-            /usr/lib/libz.1.dylib) ;;
-            /usr/lib/libiconv.2.dylib) ;;
-            /usr/lib/libresolv.9.dylib) ;;
-            /System/Library/Frameworks/*) ;;
-            /System/Library/PrivateFrameworks/*) ;;
-            @rpath/*|@loader_path/*|@executable_path/*) ;;
-            "") ;;
-            *) echo "$dep" ;;
-        esac
-    done)"
+    # Build the allowed regex as ERE. Single-quoted so backslashes pass through
+    # literally to grep. Anchored with ^...$ so partial matches don't slip by.
+    local allowed_re='^(/usr/lib/(libSystem\.B|libc\+\+\.1|libc\+\+abi|libobjc\.A|libz\.1|libiconv\.2|libresolv\.9)\.dylib|/System/Library/(Frameworks|PrivateFrameworks)/.*|@rpath/.*|@loader_path/.*|@executable_path/.*)$'
+    # Initialize to empty so set -u doesn't complain if the assignment below
+    # somehow produces nothing.
+    local unexpected_deps=""
+    # `grep -Ev` prints lines NOT matching the allowed regex (i.e. unexpected deps).
+    # `|| true` swallows grep's exit 1 ("no matches") so the assignment doesn't
+    # fail the script via set -e when everything is properly whitelisted.
+    unexpected_deps="$(otool -L "$dylib" | tail -n +2 | awk '{print $1}' | grep -Ev "$allowed_re" || true)"
     if [ -n "$unexpected_deps" ]; then
         warn "!!! Unexpected dylib load commands (non-portable):"
         echo "$unexpected_deps" | sed 's/^/    /' >&2
