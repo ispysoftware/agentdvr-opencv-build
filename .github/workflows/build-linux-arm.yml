@@ -116,14 +116,14 @@ jobs:
       # Build via direct `docker buildx build` (not docker/build-push-action) so
       # we can `tee` stdout/stderr to a workspace file. That file is uploaded as
       # an artifact in a later if:always() step, giving us the full build log
-      # whether the build succeeds OR fails. The action wraps stdout in a way
-      # that makes capturing it for later upload harder.
+      # whether the build succeeds OR fails.
       #
-      # cache-from/cache-to with type=gha persists the BuildKit cache — including
-      # the --mount=type=cache,id=emgucv-ccache-* mounts set up in the Dockerfile —
-      # across workflow runs. `scope` keeps the two arches' caches separate.
-      # `mode=max` caches intermediate layers in addition to the final result.
-      # `--progress=plain` ensures unfiltered, line-buffered output (no fancy TTY
+      # No cache-from/cache-to flags — BuildKit's mount=cache (ccache) doesn't
+      # export via type=gha anyway, and layer cache wouldn't survive Emgu tag
+      # bumps (the only time we actually rebuild). Expected build cadence is
+      # ~once a year; cold builds are fine.
+      #
+      # `--progress=plain` gives unfiltered, line-buffered output (no fancy TTY
       # codes) which is easier to tee and grep.
       - name: Build libcvextern.so (${{ matrix.arch }})
         if: ${{ matrix.enabled == true || matrix.enabled == 'true' }}
@@ -140,8 +140,6 @@ jobs:
             --build-arg BUILD_TYPE=full \
             --build-arg PORTABLE="${PORTABLE_VAL}" \
             --output type=local,dest=./out/${{ matrix.outdir }} \
-            --cache-from type=gha,scope=emgucv-${{ matrix.arch }} \
-            --cache-to type=gha,mode=max,scope=emgucv-${{ matrix.arch }} \
             --progress=plain \
             . 2>&1 | tee buildx-${{ matrix.arch }}.log
 

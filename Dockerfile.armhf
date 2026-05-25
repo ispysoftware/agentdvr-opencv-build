@@ -150,14 +150,10 @@ RUN if [ "${PORTABLE}" = "1" ]; then \
 
 # The bookworm configure ends with `cmake --build . --parallel 1 --target package`.
 # Replace --parallel 1 with --parallel $(nproc) and run.
-#
-# BuildKit cache mount: separate id per arch so caches don't collide. See Dockerfile.x64.
-RUN --mount=type=cache,id=emgucv-ccache-armhf,target=/root/.ccache,sharing=locked \
-    set -o pipefail ; \
-    if [ -n "${JOBS}" ]; then PARALLEL="${JOBS}"; else PARALLEL="$(nproc)"; fi; \
+# No persistent BuildKit cache mount — see Dockerfile.x64.
+RUN if [ -n "${JOBS}" ]; then PARALLEL="${JOBS}"; else PARALLEL="$(nproc)"; fi; \
     sed -i "s|--parallel 1|--parallel ${PARALLEL}|g" cmake_configure; \
     export MAKEFLAGS="-j${PARALLEL}"; \
-    echo "=== ccache stats (before build) ===" ; ccache -s ; \
     echo "Building with PARALLEL=${PARALLEL}"; \
     bash ./cmake_configure ${BUILD_TYPE} 2>&1 | tee /tmp/emgu_build.log ; \
     BUILD_RC=$? ; \
@@ -166,7 +162,6 @@ RUN --mount=type=cache,id=emgucv-ccache-armhf,target=/root/.ccache,sharing=locke
       echo "!!! BUILD FAILED with exit code $BUILD_RC. Scroll up to find the actual error." >&2 ; \
       echo "!!! Full build log is at /tmp/emgu_build.log inside the build container." >&2 ; \
     fi ; \
-    echo "=== ccache stats (after build) ===" ; ccache -s ; \
     exit $BUILD_RC
 
 # ---- Strip + Verify -------------------------------------------------------

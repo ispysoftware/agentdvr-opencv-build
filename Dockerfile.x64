@@ -224,19 +224,12 @@ RUN if [ "${PORTABLE}" = "1" ]; then \
     fi
 
 # Run configure (which also kicks off `make`). MAKEFLAGS must be set inside RUN so $(nproc) expands.
-# Tee output so a CI can scrape it.
-#
-# BuildKit cache mount: persists ccache across `docker buildx build` invocations.
-# `id=` namespaces the cache so x64/arm64/armhf don't collide (different ABIs).
-# `sharing=locked` serializes concurrent writes to the same cache. First build is
-# full-cost; subsequent builds of unchanged sources are ~5-10 min instead of 30+.
-# Cache survives until `docker buildx prune` is run.
-RUN --mount=type=cache,id=emgucv-ccache-x64,target=/root/.ccache,sharing=locked \
-    set -o pipefail ; \
-    if [ -n "${JOBS}" ]; then PARALLEL="${JOBS}"; else PARALLEL="$(nproc)"; fi; \
+# Tee full output to /tmp/emgu_build.log AND stdout so CI captures everything.
+# ccache is installed and on PATH but no persistent mount — would only help on
+# local iterative builds, which aren't the expected usage pattern.
+RUN if [ -n "${JOBS}" ]; then PARALLEL="${JOBS}"; else PARALLEL="$(nproc)"; fi; \
     sed -i "s|--parallel 1|--parallel ${PARALLEL}|g" cmake_configure; \
     export MAKEFLAGS="-j${PARALLEL}"; \
-    echo "=== ccache stats (before build) ===" ; ccache -s ; \
     echo "Building with PARALLEL=${PARALLEL}"; \
     bash ./cmake_configure ${BUILD_TYPE} 2>&1 | tee /tmp/emgu_build.log ; \
     BUILD_RC=$? ; \
@@ -245,7 +238,6 @@ RUN --mount=type=cache,id=emgucv-ccache-x64,target=/root/.ccache,sharing=locked 
       echo "!!! BUILD FAILED with exit code $BUILD_RC. Scroll up to find the actual error." >&2 ; \
       echo "!!! Full build log is at /tmp/emgu_build.log inside the build container." >&2 ; \
     fi ; \
-    echo "=== ccache stats (after build) ===" ; ccache -s ; \
     exit $BUILD_RC
 
 # ---- Strip + Verify ------------------------------------------------------
