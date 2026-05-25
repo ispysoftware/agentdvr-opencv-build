@@ -1,0 +1,55 @@
+# Default: treat files as text and let git auto-detect, but always store as LF
+# in the repository. Working-tree line endings depend on each contributor's
+# editor / core.autocrlf setting.
+* text=auto eol=lf
+
+# Files that must use LF — they execute inside Linux containers or are parsed
+# by tooling that breaks on CRLF.
+*.sh        text eol=lf
+*.bash      text eol=lf
+Dockerfile* text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.cmake     text eol=lf
+CMakeLists.txt text eol=lf
+*.patch     text eol=lf
+*.stub      text eol=lf
+
+# C / C++ source — LF is the conventional storage format.
+*.c   text eol=lf
+*.h   text eol=lf
+*.cpp text eol=lf
+*.hpp text eol=lf
+*.cc  text eol=lf
+*.hh  text eol=lf
+
+# PowerShell — runs on Windows; CRLF avoids occasional PS 5.1 parser quirks
+# on files with mixed line endings.
+*.ps1 text eol=crlf
+*.psm1 text eol=crlf
+*.psd1 text eol=crlf
+
+# Windows batch files require CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Markdown / docs — let git auto-detect based on contributor's setup.
+*.md  text
+*.txt text
+LICENSE text
+
+# Binary artifacts — never normalize.
+*.so    binary
+*.dll   binary
+*.dylib binary
+*.exe   binary
+*.zip   binary
+*.tar   binary
+*.gz    binary
+*.tgz   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
