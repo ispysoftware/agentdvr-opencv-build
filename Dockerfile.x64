@@ -27,6 +27,13 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8
 
+# Use bash with pipefail for all RUN steps. Buster's default /bin/sh is dash
+# 0.5.10.2, which predates pipefail support (added in dash 0.5.11, mid-2020).
+# Without pipefail, the build RUN's `cmake_configure | tee | tail` pipeline
+# returned tail's exit code (always 0), silently masking real compile errors.
+# bash is a superset of POSIX sh — other RUN steps work unchanged.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 # Fix apt sources — Buster (Debian 10) reached EOL June 2024 and moved to the archive.
 # Disable Valid-Until check because the archived Release files have expired dates.
 RUN printf 'deb http://archive.debian.org/debian buster main\ndeb http://archive.debian.org/debian-security buster/updates main\n' \
