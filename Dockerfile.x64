@@ -277,9 +277,18 @@ RUN set -e ; \
     file libcvextern.so ; \
     ls -lh libcvextern.so ; \
     echo "=== GLIBC SYMBOLS REQUIRED (max should be <= 2.28) ===" ; \
-    MAX_GLIBC="$(nm --dynamic --undefined-only libcvextern.so | grep -oE 'GLIBC_[0-9.]+' | sort -V | uniq | tail -1)" ; \
+    # Wrap the nm|grep pipeline in `set +e` so pipeline failures (e.g. grep \
+    # returning 1 when no matches, or nm exiting non-zero on certain stripped \
+    # binaries) don't abort the script via the SHELL-level pipefail+set-e. \
+    # This is informational; the strict whitelist check below is what matters. \
+    set +o pipefail ; set +e ; \
+    nm --dynamic --undefined-only libcvextern.so 2>/dev/null \
+      | grep -oE 'GLIBC_[0-9.]+' | sort -V | uniq > /tmp/glibc_syms.txt || true ; \
+    set -e ; set -o pipefail ; \
+    MAX_GLIBC="$(tail -1 /tmp/glibc_syms.txt 2>/dev/null || echo '(none)')" ; \
     echo "Max GLIBC symbol: ${MAX_GLIBC}" ; \
-    nm --dynamic --undefined-only libcvextern.so | grep -oE 'GLIBC_[0-9.]+' | sort -V | uniq | tail -10 ; \
+    echo "All GLIBC versions referenced:" ; \
+    cat /tmp/glibc_syms.txt 2>/dev/null | sed 's/^/  /' || echo "  (none)" ; \
     echo "=== NEEDED ENTRIES (must be whitelist-only) ===" ; \
     readelf -d libcvextern.so | grep NEEDED ; \
     \
