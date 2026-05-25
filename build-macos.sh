@@ -60,6 +60,32 @@ if ! command -v dotnet >/dev/null 2>&1; then
     fail "dotnet not found. Install .NET 8 SDK: brew install --cask dotnet-sdk"
 fi
 
+# ccache: optional but highly recommended. Reduces rebuild time from ~60-90 min to
+# ~10-15 min when source is unchanged (e.g., iterating on portable patches or flags).
+# Detect Homebrew's ccache libexec dir for both Intel (/usr/local) and Apple Silicon
+# (/opt/homebrew) prefixes. Prepending libexec to PATH puts ccache-wrapped clang/clang++
+# symlinks ahead of the real compilers, and cmake picks them up transparently.
+CCACHE_LIBEXEC=""
+if command -v ccache >/dev/null 2>&1; then
+    for candidate in /opt/homebrew/opt/ccache/libexec /usr/local/opt/ccache/libexec; do
+        if [ -d "$candidate" ]; then
+            CCACHE_LIBEXEC="$candidate"
+            break
+        fi
+    done
+    if [ -n "$CCACHE_LIBEXEC" ]; then
+        export PATH="$CCACHE_LIBEXEC:$PATH"
+        export CCACHE_COMPILERCHECK=content
+        export CCACHE_MAXSIZE=10G
+        export CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime
+        echo "ccache: $(ccache --version | head -1) — wrapping via $CCACHE_LIBEXEC"
+    else
+        warn "ccache found but Homebrew libexec dir not located — proceeding without."
+    fi
+else
+    warn "ccache not installed — rebuilds will be slow. Install with: brew install ccache"
+fi
+
 echo "Host: $(uname -m) ($(sw_vers -productName) $(sw_vers -productVersion))"
 echo "cmake: $(cmake --version | head -1)"
 echo "clang: $(clang --version | head -1)"
@@ -229,12 +255,36 @@ build_arch() {
             echo '# AgentDVR-minimal portable build flags'
             echo 'set(BUILD_LIST "core,imgproc,calib3d,features2d,flann,video,objdetect,tracking,plot,bgsegm" CACHE STRING "")'
             echo "set(OPENCV_EXTRA_MODULES_PATH \"$contrib_path\" CACHE PATH \"\")"
+            # CRITICAL: WITH_*=OFF flags below prevent OpenCV's CMake from auto-detecting
+            # and linking Homebrew-provided libs (libtiff, libpng, libjpeg, etc.) at
+            # paths like /opt/homebrew/opt/libtiff/lib/libtiff.dylib or
+            # /usr/local/opt/libtiff/lib/libtiff.dylib. Those absolute paths get baked
+            # into the dylib's LC_LOAD_DYLIB load commands and break on end-user machines
+            # that don't have Homebrew installed (or have it at a different prefix).
+            # BUILD_*=OFF (further below) just tells OpenCV not to compile its bundled
+            # copy — without WITH_*=OFF, the system version still gets linked.
+            # Same fix as the Linux Dockerfiles; see Dockerfile.x64 for full rationale.
             echo 'set(WITH_FFMPEG OFF CACHE BOOL "")'
             echo 'set(WITH_GSTREAMER OFF CACHE BOOL "")'
             echo 'set(WITH_V4L OFF CACHE BOOL "")'
             echo 'set(WITH_HDF5 OFF CACHE BOOL "")'
             echo 'set(WITH_VTK OFF CACHE BOOL "")'
             echo 'set(WITH_GDAL OFF CACHE BOOL "")'
+            echo 'set(WITH_TIFF OFF CACHE BOOL "")'
+            echo 'set(WITH_JPEG OFF CACHE BOOL "")'
+            echo 'set(WITH_PNG OFF CACHE BOOL "")'
+            echo 'set(WITH_WEBP OFF CACHE BOOL "")'
+            echo 'set(WITH_OPENEXR OFF CACHE BOOL "")'
+            echo 'set(WITH_JASPER OFF CACHE BOOL "")'
+            echo 'set(WITH_OPENJPEG OFF CACHE BOOL "")'
+            echo 'set(WITH_FREETYPE OFF CACHE BOOL "")'
+            echo 'set(WITH_PROTOBUF OFF CACHE BOOL "")'
+            echo 'set(WITH_ADE OFF CACHE BOOL "")'
+            echo 'set(WITH_OBSENSOR OFF CACHE BOOL "")'
+            echo 'set(WITH_1394 OFF CACHE BOOL "")'
+            # macOS-specific: AVFoundation is Apple's video capture framework, pulled
+            # in by videoio module (not in BUILD_LIST anyway, but disable explicitly).
+            echo 'set(WITH_AVFOUNDATION OFF CACHE BOOL "")'
             echo 'set(WITH_IPP OFF CACHE BOOL "")'
             echo 'set(WITH_OPENCL OFF CACHE BOOL "")'
             echo 'set(WITH_LAPACK OFF CACHE BOOL "")'
@@ -272,11 +322,17 @@ build_arch() {
     # Build only the cvextern target (skips Emgu's dotnet projects, examples, etc.)
     section "cmake --build (target: cvextern, jobs: $jobs)"
     echo "Build log    -> $build_dir/cmake-build.log"
+    if [ -n "$CCACHE_LIBEXEC" ]; then
+        echo "=== ccache stats (before build) ==="; ccache -s
+    fi
     ( cd "$build_dir" && cmake --build . --config Release --target cvextern --parallel "$jobs" 2>&1 | tee cmake-build.log ) || {
         warn "Last 80 lines of build log:"
         tail -80 "$build_dir/cmake-build.log"
         fail "cmake build failed for $logical_arch"
     }
+    if [ -n "$CCACHE_LIBEXEC" ]; then
+        echo "=== ccache stats (after build) ==="; ccache -s
+    fi
 
     # Locate output
     local dylib="$SRC_DIR/libs/runtimes/osx/native/$logical_arch/libcvextern.dylib"
@@ -298,6 +354,46 @@ build_arch() {
     if ! file "$dylib" | grep -q "$cmake_arch"; then
         warn "Output dylib arch doesn't match expected $cmake_arch"
     fi
+
+    # Verify load commands against an allowed-system-only whitelist.
+    # Linux equivalent: the readelf NEEDED whitelist in Dockerfile.x64. Same goal —
+    # fail the build if any load command references a path that isn't guaranteed
+    # to exist on every end-user macOS install. The big risks on macOS are Homebrew
+    # paths (/opt/homebrew/... on Apple Silicon, /usr/local/opt/... on Intel) — those
+    # only exist if the user has Homebrew installed at the same prefix.
+    #
+    # Allowed:
+    #   /usr/lib/lib{System,c++,objc,z}.* — base macOS, present on every install
+    #   /System/Library/Frameworks/*       — built-in Apple frameworks
+    #   @rpath / @loader_path / @executable_path — relocatable refs (self-ref typically)
+    echo "Verify load commands (otool -L whitelist):"
+    otool -L "$dylib"
+    local unexpected_deps
+    unexpected_deps="$(otool -L "$dylib" | tail -n +2 | awk '{print $1}' | while read -r dep; do
+        case "$dep" in
+            /usr/lib/libSystem.B.dylib) ;;
+            /usr/lib/libc++.1.dylib) ;;
+            /usr/lib/libc++abi.dylib) ;;
+            /usr/lib/libobjc.A.dylib) ;;
+            /usr/lib/libz.1.dylib) ;;
+            /usr/lib/libiconv.2.dylib) ;;
+            /usr/lib/libresolv.9.dylib) ;;
+            /System/Library/Frameworks/*) ;;
+            /System/Library/PrivateFrameworks/*) ;;
+            @rpath/*|@loader_path/*|@executable_path/*) ;;
+            "") ;;
+            *) echo "$dep" ;;
+        esac
+    done)"
+    if [ -n "$unexpected_deps" ]; then
+        warn "!!! Unexpected dylib load commands (non-portable):"
+        echo "$unexpected_deps" | sed 's/^/    /' >&2
+        warn "These paths are NOT guaranteed to exist on end-user macOS installs."
+        warn "Homebrew paths (/opt/homebrew/..., /usr/local/opt/...) are the usual culprit."
+        warn "Add the corresponding -DWITH_<NAME>=OFF flag to the init_cache above."
+        fail "Aborting: libcvextern.dylib has non-portable dependencies."
+    fi
+    ok "Load commands OK — only portable system deps."
 
     # Copy to output
     local arch_out_dir="$OUT_DIR/macos-$logical_arch"

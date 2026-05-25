@@ -60,10 +60,11 @@ jobs:
       - name: Install build tools
         run: |
           brew update --quiet
-          brew install --quiet cmake git || true
+          brew install --quiet cmake git ccache || true
           cmake --version
           git --version
           clang --version
+          ccache --version | head -1
 
       - name: Install .NET 8 SDK
         uses: actions/setup-dotnet@v4
@@ -94,6 +95,20 @@ jobs:
         with:
           path: src/emgucv
           key: emgucv-src-${{ steps.emgu.outputs.tag }}-v1
+
+      # Persist ccache across workflow runs. Key includes the Emgu tag + commit SHA
+      # so a fresh build saves a new cache; restore-keys lets it warm-start from
+      # any earlier cache for the same Emgu tag (most files unchanged across
+      # workflow-only changes). ~/.ccache is the default CCACHE_DIR — matches
+      # what build-macos.sh sets up via the Homebrew ccache wrapper.
+      - name: Cache ccache compile cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-macos-${{ steps.emgu.outputs.tag }}-${{ github.sha }}
+          restore-keys: |
+            ccache-macos-${{ steps.emgu.outputs.tag }}-
+            ccache-macos-
 
       - name: Build
         env:

@@ -113,25 +113,49 @@ jobs:
         if: ${{ matrix.enabled == true || matrix.enabled == 'true' }}
         uses: docker/setup-buildx-action@v3
 
-      # Build via docker buildx. cache-from/cache-to with type=gha persists the
-      # BuildKit cache — including our --mount=type=cache,id=emgucv-ccache-* mounts
-      # set up in the Dockerfile — across workflow runs. `scope` keeps the two
-      # arches' caches separate (different ABIs, non-shareable cached objects).
+      # Build via direct `docker buildx build` (not docker/build-push-action) so
+      # we can `tee` stdout/stderr to a workspace file. That file is uploaded as
+      # an artifact in a later if:always() step, giving us the full build log
+      # whether the build succeeds OR fails. The action wraps stdout in a way
+      # that makes capturing it for later upload harder.
+      #
+      # cache-from/cache-to with type=gha persists the BuildKit cache — including
+      # the --mount=type=cache,id=emgucv-ccache-* mounts set up in the Dockerfile —
+      # across workflow runs. `scope` keeps the two arches' caches separate.
       # `mode=max` caches intermediate layers in addition to the final result.
+      # `--progress=plain` ensures unfiltered, line-buffered output (no fancy TTY
+      # codes) which is easier to tee and grep.
       - name: Build libcvextern.so (${{ matrix.arch }})
         if: ${{ matrix.enabled == true || matrix.enabled == 'true' }}
-        uses: docker/build-push-action@v6
+        env:
+          PORTABLE_VAL: ${{ github.event.inputs.portable == 'false' && '0' || '1' }}
+          EMGU_TAG_VAL: ${{ needs.resolve-tag.outputs.emgu_tag }}
+        run: |
+          set -o pipefail
+          mkdir -p ./out
+          docker buildx build \
+            --platform ${{ matrix.platform }} \
+            --file ${{ matrix.dockerfile }} \
+            --build-arg EMGU_TAG="${EMGU_TAG_VAL}" \
+            --build-arg BUILD_TYPE=full \
+            --build-arg PORTABLE="${PORTABLE_VAL}" \
+            --output type=local,dest=./out/${{ matrix.outdir }} \
+            --cache-from type=gha,scope=emgucv-${{ matrix.arch }} \
+            --cache-to type=gha,mode=max,scope=emgucv-${{ matrix.arch }} \
+            --progress=plain \
+            . 2>&1 | tee buildx-${{ matrix.arch }}.log
+
+      # Always upload the buildx log — runs on success, failure, or cancellation.
+      # On failure this is the primary diagnostic; on success it's useful for
+      # checking ccache hit rates and verifying the GLIBC/whitelist output.
+      - name: Upload buildx log (always)
+        if: ${{ always() && (matrix.enabled == true || matrix.enabled == 'true') }}
+        uses: actions/upload-artifact@v4
         with:
-          context: .
-          file: ${{ matrix.dockerfile }}
-          platforms: ${{ matrix.platform }}
-          build-args: |
-            EMGU_TAG=${{ needs.resolve-tag.outputs.emgu_tag }}
-            BUILD_TYPE=full
-            PORTABLE=${{ github.event.inputs.portable == 'false' && '0' || '1' }}
-          outputs: type=local,dest=./out/${{ matrix.outdir }}
-          cache-from: type=gha,scope=emgucv-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=emgucv-${{ matrix.arch }}
+          name: buildx-log-${{ matrix.arch }}
+          path: buildx-${{ matrix.arch }}.log
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Show output details
         if: ${{ matrix.enabled == true || matrix.enabled == 'true' }}

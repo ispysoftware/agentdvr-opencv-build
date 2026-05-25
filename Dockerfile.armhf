@@ -155,8 +155,13 @@ RUN --mount=type=cache,id=emgucv-ccache-armhf,target=/root/.ccache,sharing=locke
     export MAKEFLAGS="-j${PARALLEL}"; \
     echo "=== ccache stats (before build) ===" ; ccache -s ; \
     echo "Building with PARALLEL=${PARALLEL}"; \
-    bash ./cmake_configure ${BUILD_TYPE} 2>&1 | tee /tmp/emgu_build.log | tail -200 ; \
+    bash ./cmake_configure ${BUILD_TYPE} 2>&1 | tee /tmp/emgu_build.log ; \
     BUILD_RC=$? ; \
+    if [ "$BUILD_RC" != "0" ]; then \
+      echo "" >&2 ; \
+      echo "!!! BUILD FAILED with exit code $BUILD_RC. Scroll up to find the actual error." >&2 ; \
+      echo "!!! Full build log is at /tmp/emgu_build.log inside the build container." >&2 ; \
+    fi ; \
     echo "=== ccache stats (after build) ===" ; ccache -s ; \
     exit $BUILD_RC
 
