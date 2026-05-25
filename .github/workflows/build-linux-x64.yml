@@ -1,0 +1,128 @@
+# Build libcvextern.so for linux-x64 on GitHub's standard x64 hosted runners.
+# Native x86_64 execution on real server hardware — fast, free, unlimited for
+# public repos.
+#
+# Typical run time: ~6-10 min (native, no emulation).
+#
+# Triggers:
+#   * workflow_dispatch -- manual run from the Actions tab.
+#   * push -- on tags matching opencv-v*.
+#
+# Runner: ubuntu-24.04 (standard hosted Linux x64).
+# Mirrors the layout of build-linux-arm.yml — see that file for the structure
+# rationale (direct buildx command + tee for log capture, etc.).
+
+name: Build Linux x64 libcvextern
+
+permissions:
+  contents: write   # softprops/action-gh-release needs this on tag push
+
+on:
+  workflow_dispatch:
+    inputs:
+      emgu_tag:
+        description: 'Emgu CV git tag to build'
+        required: true
+        default: '4.12.0'
+      portable:
+        description: 'Apply AgentDVR-minimal patches (BUILD_LIST + CUDA stubs + size cuts)'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+  push:
+    tags:
+      - 'opencv-v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60   # 1 hour hard limit; typical run is 6-10 min.
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      # Strip any .NNNN NuGet revision suffix (e.g. 4.12.0.5764 -> 4.12.0)
+      # so push tags like opencv-v4.12.0.5764 still resolve to git tag 4.12.0.
+      - name: Determine Emgu tag
+        id: emgu
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            RAW="${{ github.event.inputs.emgu_tag }}"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            RAW="${GITHUB_REF#refs/tags/opencv-v}"
+          else
+            RAW="4.12.0"
+          fi
+          EMGU_TAG="$(echo "$RAW" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' || echo "$RAW")"
+          echo "tag=$EMGU_TAG" >> "$GITHUB_OUTPUT"
+          echo "Resolved Emgu tag: $EMGU_TAG"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build via direct `docker buildx build` so we can tee stdout/stderr to a
+      # workspace file for if:always() artifact upload. See build-linux-arm.yml
+      # for the full rationale on this pattern.
+      - name: Build libcvextern.so (x64)
+        env:
+          PORTABLE_VAL: ${{ github.event.inputs.portable == 'false' && '0' || '1' }}
+          EMGU_TAG_VAL: ${{ steps.emgu.outputs.tag }}
+        run: |
+          set -o pipefail
+          mkdir -p ./out
+          docker buildx build \
+            --platform linux/amd64 \
+            --file Dockerfile.x64 \
+            --build-arg EMGU_TAG="${EMGU_TAG_VAL}" \
+            --build-arg BUILD_TYPE=full \
+            --build-arg PORTABLE="${PORTABLE_VAL}" \
+            --output type=local,dest=./out/linux-x64 \
+            --progress=plain \
+            . 2>&1 | tee buildx-x64.log
+
+      - name: Upload buildx log (always)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: buildx-log-x64
+          path: buildx-x64.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Show output details
+        run: |
+          SO=./out/linux-x64/libcvextern.so
+          if [ ! -f "$SO" ]; then
+            echo "ERROR: $SO was not produced"
+            ls -la ./out/ ./out/linux-x64/ 2>/dev/null || true
+            exit 1
+          fi
+          echo "=== file ==="; file "$SO"
+          echo "=== size ==="; du -h "$SO"
+          echo "=== readelf -d (NEEDED) ==="; readelf -d "$SO" | grep NEEDED
+          echo "=== ldd ==="; ldd "$SO" || true
+
+      - name: Zip artifact
+        run: |
+          cd ./out/linux-x64
+          zip -9 ../linux-x64.zip libcvextern.so emgu_build.log 2>/dev/null || zip -9 ../linux-x64.zip libcvextern.so
+          ls -lh ../linux-x64.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          path: out/linux-x64.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach to GitHub Release (on tag push only)
+        if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/opencv-v') }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/linux-x64.zip
+          fail_on_unmatched_files: false
