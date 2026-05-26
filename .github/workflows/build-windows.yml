@@ -1,0 +1,137 @@
+# Build cvextern.dll for win-x64 on GitHub's standard Windows hosted runners.
+# Native MSVC build — no Docker, no cross-compilation.
+#
+# Typical run time: ~60-90 min on first run (clone + full cmake build).
+# Subsequent runs for the same Emgu tag hit the source cache and skip the
+# 20-30 min clone + submodule init, reducing the build to ~40-60 min.
+#
+# Triggers:
+#   * workflow_dispatch -- manual run from the Actions tab.
+#   * push -- on tags matching opencv-v*.
+#
+# Runner: windows-2022 (VS 2022, cmake, git, .NET 8 all pre-installed).
+# Delegates all build logic to build-windows.ps1 in the repo root.
+
+name: Build Windows x64 cvextern
+
+permissions:
+  contents: write   # softprops/action-gh-release needs this on tag push
+
+on:
+  workflow_dispatch:
+    inputs:
+      emgu_tag:
+        description: 'Emgu CV git tag to build'
+        required: true
+        default: '4.12.0'
+      portable:
+        description: 'Apply AgentDVR-minimal patches (BUILD_LIST + CUDA stubs + size cuts)'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+  push:
+    tags:
+      - 'opencv-v*'
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 180   # 3 hour hard limit; typical run is 60-90 min.
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      # Strip any .NNNN NuGet revision suffix (e.g. 4.12.0.5764 -> 4.12.0)
+      # so push tags like opencv-v4.12.0.5764 still resolve to git tag 4.12.0.
+      - name: Determine Emgu tag
+        id: emgu
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $RAW = "${{ github.event.inputs.emgu_tag }}"
+          } elseif ("${{ github.event_name }}" -eq "push") {
+            $RAW = $env:GITHUB_REF -replace "refs/tags/opencv-v", ""
+          } else {
+            $RAW = "4.12.0"
+          }
+          $EMGU_TAG = if ($RAW -match "^(\d+\.\d+\.\d+)") { $Matches[1] } else { $RAW }
+          "tag=$EMGU_TAG"        | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+          "raw_version=$RAW"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+          Write-Host "Tag input:    $RAW"
+          Write-Host "Emgu git tag: $EMGU_TAG"
+
+      # Cache the source clone (emgucv + submodules) keyed by Emgu tag.
+      # The clone + submodule init takes 20-30 min on a cold runner; this
+      # cache makes warm runs skip that entirely. The cmake build_win-x64
+      # directory lives inside src/emgucv so it is included — incremental
+      # cmake builds on cache hits avoid recompiling unchanged translation units.
+      - name: Cache emgucv source + build tree
+        uses: actions/cache@v4
+        with:
+          path: src/emgucv
+          key: emgucv-win-x64-${{ steps.emgu.outputs.tag }}-v1
+
+      # windows-2022 ships with .NET 8; pin the version here explicitly so
+      # the build doesn't break if the runner image bumps to .NET 9 later.
+      - name: Install .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build cvextern.dll
+        shell: pwsh
+        run: |
+          $portable = "${{ github.event.inputs.portable || 'true' }}" -eq 'true'
+          .\build-windows.ps1 `
+            -EmguTag "${{ steps.emgu.outputs.tag }}" `
+            -VsVersion 2022 `
+            -Portable:$portable
+
+      - name: Upload build logs (always)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-win-x64
+          path: |
+            src/cmake-configure.log
+            src/cmake-build.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Show output details
+        shell: pwsh
+        run: |
+          $dll = ".\out\win-x64\cvextern.dll"
+          if (-not (Test-Path $dll)) {
+            Write-Error "ERROR: $dll was not produced"
+            Get-ChildItem .\out\ -Recurse -ErrorAction SilentlyContinue | Sort-Object FullName
+            exit 1
+          }
+          $sizeMB = [math]::Round((Get-Item $dll).Length / 1MB, 2)
+          Write-Host "=== size ==="; Write-Host "cvextern.dll: $sizeMB MB"
+          Write-Host "=== dumpbin exports (sample) ==="
+          if (Get-Command dumpbin -ErrorAction SilentlyContinue) {
+            $count = (& dumpbin /exports $dll 2>$null | Select-String 'CvInvoke|cve[A-Z]' | Measure-Object).Count
+            Write-Host "Exported symbols matching cve* / CvInvoke*: $count"
+          } else {
+            Write-Host "(dumpbin not on PATH; skipping export check)"
+          }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-x64
+          path: out/win-x64.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach to GitHub Release (on tag push only)
+        if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/opencv-v') }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/win-x64.zip
+          fail_on_unmatched_files: false
