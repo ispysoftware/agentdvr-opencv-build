@@ -346,8 +346,11 @@ if ($Portable) {
         'set(BUILD_WEBP OFF CACHE BOOL "")',
         'set(BUILD_JASPER OFF CACHE BOOL "")',
         'set(BUILD_OPENEXR OFF CACHE BOOL "")',
-        'set(CPU_BASELINE "SSE4_2" CACHE STRING "")',
-        'set(CPU_DISPATCH "AVX;FP16;AVX2;AVX_512F;AVX512_SKX" CACHE STRING "")'
+        '# Baseline lowered SSE4_2 -> SSE3 so pre-SSE4.2 x86 CPUs (e.g. AMD K10) can run;',
+        '# SSSE3/SSE4_1/POPCNT/SSE4_2 moved to dispatch so modern CPUs still pick them at runtime.',
+        '# Keep in sync with Dockerfile.x64 (linux-x64) and the SSE3 guard in CoreLogic Threads.StartUp.',
+        'set(CPU_BASELINE "SSE3" CACHE STRING "")',
+        'set(CPU_DISPATCH "SSSE3;SSE4_1;POPCNT;SSE4_2;AVX;FP16;AVX2;AVX_512F;AVX512_SKX" CACHE STRING "")'
     )
 }
 

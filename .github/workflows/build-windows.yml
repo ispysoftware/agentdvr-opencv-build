@@ -73,7 +73,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: src/emgucv
-          key: emgucv-win-x64-${{ steps.emgu.outputs.tag }}-v1
+          key: emgucv-win-x64-${{ steps.emgu.outputs.tag }}-v2
 
       # windows-2022 ships with .NET 8; pin the version here explicitly so
       # the build doesn't break if the runner image bumps to .NET 9 later.
