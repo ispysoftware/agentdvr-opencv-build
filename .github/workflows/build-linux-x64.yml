@@ -23,7 +23,7 @@ on:
       emgu_tag:
         description: 'Emgu CV git tag to build'
         required: true
-        default: '4.12.0'
+        default: '5.0.0'
       portable:
         description: 'Apply AgentDVR-minimal patches (BUILD_LIST + CUDA stubs + size cuts)'
         required: true
@@ -45,8 +45,8 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # Strip any .NNNN NuGet revision suffix (e.g. 4.12.0.5764 -> 4.12.0)
-      # so push tags like opencv-v4.12.0.5764 still resolve to git tag 4.12.0.
+      # Strip any .NNNN NuGet revision suffix (e.g. 5.0.0.6584 -> 5.0.0)
+      # so push tags like opencv-v5.0.0.6584 still resolve to git tag 5.0.0.
       - name: Determine Emgu tag
         id: emgu
         run: |
@@ -55,7 +55,7 @@ jobs:
           elif [ "${{ github.event_name }}" = "push" ]; then
             RAW="${GITHUB_REF#refs/tags/opencv-v}"
           else
-            RAW="4.12.0"
+            RAW="5.0.0"
           fi
           EMGU_TAG="$(echo "$RAW" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' || echo "$RAW")"
           echo "tag=$EMGU_TAG" >> "$GITHUB_OUTPUT"

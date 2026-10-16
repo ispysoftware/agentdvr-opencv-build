@@ -15,7 +15,7 @@
 #   ./build-macos.sh                # both archs
 #   ./build-macos.sh x64            # Intel only
 #   ./build-macos.sh arm64          # Apple Silicon only
-#   EMGU_TAG=4.12.0 ./build-macos.sh
+#   EMGU_TAG=5.0.0 ./build-macos.sh
 #   MACOS_MIN=12.0 ./build-macos.sh # bump minimum macOS version (default 11.0)
 #   PORTABLE=0 ./build-macos.sh     # build Emgu's stock "full" without the minimal patches
 
@@ -23,7 +23,7 @@ set -euo pipefail
 
 # ---- Configurable knobs --------------------------------------------------
 ARCH_ARG="${1:-both}"
-EMGU_TAG="${EMGU_TAG:-4.12.0}"
+EMGU_TAG="${EMGU_TAG:-5.0.0}"
 JOBS="${JOBS:-0}"
 PORTABLE="${PORTABLE:-1}"
 OUT_DIR="${OUT_DIR:-./out}"
@@ -110,7 +110,13 @@ if [ ! -d "$SRC_DIR" ]; then
            Emgu.CV.Extern/tesseract/libtesseract/tesseract-ocr.git \
            Emgu.CV.Extern/tesseract/libtesseract/leptonica/leptonica.git )
 else
-    echo "Source directory already exists, reusing: $SRC_DIR"
+    # The clone is reused as-is, so a stale clone of another tag would silently build the
+    # old version. Refuse instead of deleting it on the user's behalf.
+    CLONED_TAG="$(git -C "$SRC_DIR" describe --tags --exact-match HEAD 2>/dev/null || echo '(unknown)')"
+    if [ "$CLONED_TAG" != "$EMGU_TAG" ]; then
+        fail "Existing source at $SRC_DIR is Emgu tag $CLONED_TAG, not $EMGU_TAG. Delete that folder (or set WORK_DIR) and re-run."
+    fi
+    echo "Source directory already exists at tag $CLONED_TAG, reusing: $SRC_DIR"
 fi
 
 # ---- Apply patches -------------------------------------------------------
@@ -119,8 +125,10 @@ if [ "$PORTABLE" = "1" ]; then
 
     # Restore patched files from git so re-runs apply patches to a clean baseline.
     # opencv is a submodule of emgucv so we cd into it.
+    # OpenCV 5 moved throw_no_cuda() from core/private.cuda.hpp to core/private/cuda_stubs.hpp.
+    CUDA_STUBS_REL='modules/core/include/opencv2/core/private/cuda_stubs.hpp'
     ( cd "$SRC_DIR/opencv" && \
-        git checkout HEAD -- 'modules/core/include/opencv2/core/private.cuda.hpp' 2>/dev/null ) || true
+        git checkout HEAD -- "$CUDA_STUBS_REL" 2>/dev/null ) || true
 
     ( cd "$SRC_DIR" && for f in \
         Emgu.CV.Extern/stitching/stitching_c.h \
@@ -142,16 +150,16 @@ if [ "$PORTABLE" = "1" ]; then
     done )
     echo "  Restored source files from git baseline"
 
-    # Feature2D stub -> forward decl (avoids collision with real cv::Feature2D)
+    # Feature2D stub -> forward decl (avoids collision with real cv::Feature2D).
+    # Emgu 5 already comments out the stitching_c.h stub (no-op now); nonfree_c.h still needs it.
     sed -i '' 's|class Feature2D {};|class Feature2D;|g' \
         "$SRC_DIR/Emgu.CV.Extern/stitching/stitching_c.h"
     sed -i '' 's|class Feature2D {};|class Feature2D;|g' \
         "$SRC_DIR/Emgu.CV.Extern/xfeatures2d/nonfree_c.h"
     echo "  Patched Feature2D stubs"
 
-    # Remove imgcodecs Emgu wrapper (references cv::Animation, which only exists in built imgcodecs module)
-    rm -rf "$SRC_DIR/Emgu.CV.Extern/imgcodecs"
-    echo "  Removed Emgu.CV.Extern/imgcodecs wrapper subdir"
+    # Emgu.CV.Extern/imgcodecs is no longer removed: the imgcodecs module is built now
+    # (xobjdetect needs it), and the wrapper exports cveImread for Mat(filename).
 
     # Neutralize Emgu cuda*/*_c.h throw stubs. macOS .NET handles native exceptions similar
     # to Linux (no SEH), so propagating cv::Exception through P/Invoke is risky. Same fix as
@@ -165,9 +173,14 @@ if [ "$PORTABLE" = "1" ]; then
     done
     echo "  Neutralized Emgu cuda throw stubs"
 
-    # Patch OpenCV's internal throw_no_cuda() in private.cuda.hpp -- same rationale
+    # Patch OpenCV's internal throw_no_cuda() in cuda_stubs.hpp -- same rationale. sed exits 0
+    # when nothing matches, so check the result: a silent no-op brings the crash back.
     sed -i '' 's|CV_NORETURN void throw_no_cuda() { CV_Error([^)]*); }|void throw_no_cuda() { /* defensive no-op */ }|g' \
-        "$SRC_DIR/opencv/modules/core/include/opencv2/core/private.cuda.hpp"
+        "$SRC_DIR/opencv/$CUDA_STUBS_REL"
+    if grep -q 'CV_NORETURN void throw_no_cuda' "$SRC_DIR/opencv/$CUDA_STUBS_REL" || \
+       ! grep -q 'defensive no-op' "$SRC_DIR/opencv/$CUDA_STUBS_REL"; then
+        fail "throw_no_cuda() patch did not apply to $SRC_DIR/opencv/$CUDA_STUBS_REL"
+    fi
     echo "  Patched OpenCV internal throw_no_cuda()"
 
     # Overlay the core_cuda_c.cpp stub (avoids CV_Assert in DeviceInfo constructor)
@@ -253,7 +266,8 @@ build_arch() {
         if [ "$PORTABLE" = "1" ]; then
             local contrib_path="$SRC_DIR/opencv_contrib/modules"
             echo '# AgentDVR-minimal portable build flags'
-            echo 'set(BUILD_LIST "core,imgproc,calib3d,features2d,flann,video,objdetect,tracking,plot,bgsegm" CACHE STRING "")'
+            # OpenCV 5 module names -- see Dockerfile.x64 for why each module is in the list.
+            echo 'set(BUILD_LIST "core,imgproc,geometry,flann,features,calib,stereo,objdetect,video,imgcodecs,xobjdetect,tracking,plot,bgsegm" CACHE STRING "")'
             echo "set(OPENCV_EXTRA_MODULES_PATH \"$contrib_path\" CACHE PATH \"\")"
             # CRITICAL: WITH_*=OFF flags below prevent OpenCV's CMake from auto-detecting
             # and linking Homebrew-provided libs (libtiff, libpng, libjpeg, etc.) at
@@ -271,12 +285,18 @@ build_arch() {
             echo 'set(WITH_VTK OFF CACHE BOOL "")'
             echo 'set(WITH_GDAL OFF CACHE BOOL "")'
             echo 'set(WITH_TIFF OFF CACHE BOOL "")'
-            echo 'set(WITH_JPEG OFF CACHE BOOL "")'
+            # JPEG is the one codec kept (imgcodecs is built now): BUILD_JPEG ON below makes
+            # OpenCV use its bundled libjpeg-turbo, statically linked, never Homebrew's.
+            echo 'set(WITH_JPEG ON CACHE BOOL "")'
             echo 'set(WITH_PNG OFF CACHE BOOL "")'
             echo 'set(WITH_WEBP OFF CACHE BOOL "")'
             echo 'set(WITH_OPENEXR OFF CACHE BOOL "")'
             echo 'set(WITH_JASPER OFF CACHE BOOL "")'
             echo 'set(WITH_OPENJPEG OFF CACHE BOOL "")'
+            echo 'set(WITH_AVIF OFF CACHE BOOL "")'
+            echo 'set(WITH_JPEGXL OFF CACHE BOOL "")'
+            # UNIFONT downloads and embeds a ~4 MB CJK font for putText; AgentDVR draws its own text.
+            echo 'set(WITH_UNIFONT OFF CACHE BOOL "")'
             echo 'set(WITH_FREETYPE OFF CACHE BOOL "")'
             echo 'set(WITH_PROTOBUF OFF CACHE BOOL "")'
             echo 'set(WITH_ADE OFF CACHE BOOL "")'
@@ -298,10 +318,11 @@ build_arch() {
             echo 'set(EMGU_CV_WITH_TESSERACT FALSE CACHE BOOL "")'
             echo 'set(EMGU_CV_WITH_FREETYPE FALSE CACHE BOOL "")'
             echo 'set(BUILD_PNG OFF CACHE BOOL "")'
-            echo 'set(BUILD_JPEG OFF CACHE BOOL "")'
+            echo 'set(BUILD_JPEG ON CACHE BOOL "")'
             echo 'set(BUILD_TIFF OFF CACHE BOOL "")'
             echo 'set(BUILD_WEBP OFF CACHE BOOL "")'
             echo 'set(BUILD_JASPER OFF CACHE BOOL "")'
+            echo 'set(BUILD_OPENJPEG OFF CACHE BOOL "")'
             echo 'set(BUILD_OPENEXR OFF CACHE BOOL "")'
             # CPU dispatch: only matters for x86_64. arm64 always uses NEON (baseline).
             if [ "$cmake_arch" = "x86_64" ]; then
@@ -388,6 +409,13 @@ build_arch() {
     fi
     ok "Load commands OK — only portable system deps."
 
+    # Mat(filename) in Camera.GetAlertFrame needs cveImread (Emgu imgcodecs wrapper).
+    # Mach-O prefixes C symbols with an underscore.
+    if ! nm -gU "$dylib" | grep -qw '_cveImread'; then
+        fail "libcvextern.dylib does not export cveImread (imgcodecs wrapper missing)."
+    fi
+    ok "cveImread exported."
+
     # Copy to output
     local arch_out_dir="$OUT_DIR/macos-$logical_arch"
     mkdir -p "$arch_out_dir"
@@ -411,4 +439,4 @@ case "$ARCH_ARG" in
 esac
 
 section "Done"
-echo "Upload the .zip files to https://files.ispyconnect.com/libs/opencv/${EMGU_TAG}.5764/ and bump OpenCvVersion in Dependencies.cs."
+echo "Copy out/macos-<arch>/libcvextern.dylib to agent-service/AgentCore/runtimes/osx-<arch>/native/ -- together with the other platforms and the matching Emgu.CV PackageReference in CoreLogic.csproj (see README 'Wiring into AgentDVR')."

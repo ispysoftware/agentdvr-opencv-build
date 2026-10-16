@@ -20,7 +20,7 @@
 
 FROM --platform=linux/arm/v7 debian:buster AS builder
 
-ARG EMGU_TAG=4.12.0
+ARG EMGU_TAG=5.0.0
 ARG BUILD_TYPE=full
 ARG JOBS=
 ARG PORTABLE=1
@@ -79,7 +79,7 @@ RUN mkdir -p /usr/share/dotnet \
  && ln -sf /usr/share/dotnet/dotnet /usr/bin/dotnet \
  && dotnet --version
 
-# Buster ships cmake 3.13 but EmguCV 4.12 requires cmake >= 3.16.
+# Buster ships cmake 3.13 but EmguCV 5.0 requires cmake >= 3.16.
 # cmake.org provides no armhf binary, so build from source via the bootstrap script.
 # bootstrap is architecture-agnostic (only needs an existing C/C++ toolchain + make).
 # Build time: ~20-40 min native; under QEMU adds roughly 1-2 h to the overall job.
@@ -118,11 +118,14 @@ RUN git submodule update --init --depth 1 --recursive -- \
 WORKDIR /work/emgucv/platforms/debian/bookworm
 
 # AgentDVR-minimal build: same module strip + portability disables as arm64.
-# See Dockerfile.x64 for the rationale behind each flag.
+# See Dockerfile.x64 for the rationale behind each flag and each BUILD_LIST module.
 # Note: no CPU_BASELINE/CPU_DISPATCH override for armhf — let OpenCV autodetect NEON.
+# Emgu 5's cmake_configure adds PNG_ARM_NEON=off and WITH_MLAS=FALSE on 32-bit by itself.
 RUN if [ "${PORTABLE}" = "1" ]; then \
-      sed -i 's|-DBUILD_TESTS:BOOL=FALSE|-DBUILD_TESTS:BOOL=FALSE -DBUILD_LIST=core,imgproc,calib3d,features2d,flann,video,objdetect,tracking,plot,bgsegm -DWITH_FFMPEG:BOOL=OFF -DWITH_GSTREAMER:BOOL=OFF -DWITH_V4L:BOOL=OFF -DWITH_LIBV4L:BOOL=OFF -DWITH_HDF5:BOOL=OFF -DWITH_VTK:BOOL=OFF -DWITH_GDAL:BOOL=OFF -DWITH_TIFF:BOOL=OFF -DWITH_JPEG:BOOL=OFF -DWITH_PNG:BOOL=OFF -DWITH_WEBP:BOOL=OFF -DWITH_OPENEXR:BOOL=OFF -DWITH_JASPER:BOOL=OFF -DWITH_OPENJPEG:BOOL=OFF -DWITH_VA:BOOL=OFF -DWITH_VA_INTEL:BOOL=OFF -DWITH_1394:BOOL=OFF -DWITH_FREETYPE:BOOL=OFF -DWITH_GTK:BOOL=OFF -DWITH_GTK_2_X:BOOL=OFF -DWITH_QT:BOOL=OFF -DWITH_OPENGL:BOOL=OFF -DWITH_PROTOBUF:BOOL=OFF -DWITH_ADE:BOOL=OFF -DWITH_OBSENSOR:BOOL=OFF -DBUILD_opencv_hdf:BOOL=OFF -DEMGU_CV_WITH_TIFF:BOOL=FALSE -DWITH_IPP:BOOL=OFF -DWITH_OPENCL:BOOL=OFF -DWITH_LAPACK:BOOL=OFF -DWITH_TBB:BOOL=OFF -DWITH_QUIRC:BOOL=OFF -DWITH_ITT:BOOL=OFF -DBUILD_IPP_IW:BOOL=OFF -DBUILD_ITT:BOOL=OFF|' cmake_configure ; \
-      sed -i 's|-DBUILD_PNG:BOOL=TRUE|-DBUILD_PNG:BOOL=FALSE|g; s|-DBUILD_JPEG:BOOL=TRUE|-DBUILD_JPEG:BOOL=FALSE|g; s|-DBUILD_TIFF:BOOL=TRUE|-DBUILD_TIFF:BOOL=FALSE|g; s|-DBUILD_WEBP:BOOL=TRUE|-DBUILD_WEBP:BOOL=FALSE|g; s|-DBUILD_JASPER:BOOL=TRUE|-DBUILD_JASPER:BOOL=FALSE|g; s|-DBUILD_OPENEXR:BOOL=TRUE|-DBUILD_OPENEXR:BOOL=FALSE|g' cmake_configure ; \
+      sed -i 's|-DBUILD_TESTS:BOOL=FALSE|-DBUILD_TESTS:BOOL=FALSE -DBUILD_LIST=core,imgproc,geometry,flann,features,calib,stereo,objdetect,video,imgcodecs,xobjdetect,tracking,plot,bgsegm -DWITH_FFMPEG:BOOL=OFF -DWITH_GSTREAMER:BOOL=OFF -DWITH_V4L:BOOL=OFF -DWITH_LIBV4L:BOOL=OFF -DWITH_HDF5:BOOL=OFF -DWITH_VTK:BOOL=OFF -DWITH_GDAL:BOOL=OFF -DWITH_TIFF:BOOL=OFF -DWITH_JPEG:BOOL=ON -DWITH_PNG:BOOL=OFF -DWITH_WEBP:BOOL=OFF -DWITH_OPENEXR:BOOL=OFF -DWITH_JASPER:BOOL=OFF -DWITH_OPENJPEG:BOOL=OFF -DWITH_AVIF:BOOL=OFF -DWITH_JPEGXL:BOOL=OFF -DWITH_UNIFONT:BOOL=OFF -DWITH_VA:BOOL=OFF -DWITH_VA_INTEL:BOOL=OFF -DWITH_1394:BOOL=OFF -DWITH_FREETYPE:BOOL=OFF -DWITH_GTK:BOOL=OFF -DWITH_GTK_2_X:BOOL=OFF -DWITH_QT:BOOL=OFF -DWITH_OPENGL:BOOL=OFF -DWITH_PROTOBUF:BOOL=OFF -DWITH_ADE:BOOL=OFF -DWITH_OBSENSOR:BOOL=OFF -DBUILD_opencv_hdf:BOOL=OFF -DEMGU_CV_WITH_TIFF:BOOL=FALSE -DWITH_IPP:BOOL=OFF -DWITH_OPENCL:BOOL=OFF -DWITH_LAPACK:BOOL=OFF -DWITH_TBB:BOOL=OFF -DWITH_QUIRC:BOOL=OFF -DWITH_ITT:BOOL=OFF -DBUILD_IPP_IW:BOOL=OFF -DBUILD_ITT:BOOL=OFF|' cmake_configure ; \
+      # BUILD_JPEG stays TRUE (bundled libjpeg-turbo, static) — see Dockerfile.x64. \
+      sed -i 's|-DBUILD_PNG:BOOL=TRUE|-DBUILD_PNG:BOOL=FALSE|g; s|-DBUILD_TIFF:BOOL=TRUE|-DBUILD_TIFF:BOOL=FALSE|g; s|-DBUILD_WEBP:BOOL=TRUE|-DBUILD_WEBP:BOOL=FALSE|g; s|-DBUILD_JASPER:BOOL=TRUE|-DBUILD_JASPER:BOOL=FALSE|g; s|-DBUILD_OPENEXR:BOOL=TRUE|-DBUILD_OPENEXR:BOOL=FALSE|g' cmake_configure ; \
+      grep -q -- '-DBUILD_JPEG:BOOL=TRUE' cmake_configure || { echo "ERROR: cmake_configure no longer sets -DBUILD_JPEG:BOOL=TRUE; add it to the injected flags." ; exit 1 ; } ; \
       sed -i 's|-DWITH_VTK:BOOL=TRUE|-DWITH_VTK:BOOL=FALSE|g; s|-DWITH_GSTREAMER:BOOL=TRUE|-DWITH_GSTREAMER:BOOL=FALSE|g' cmake_configure ; \
       sed -i 's|EMGU_CV_WITH_TESSERACT:BOOL=TRUE|EMGU_CV_WITH_TESSERACT:BOOL=FALSE|g; s|EMGU_CV_WITH_FREETYPE:BOOL=TRUE|EMGU_CV_WITH_FREETYPE:BOOL=FALSE|g' cmake_configure ; \
       echo "AgentDVR-minimal build: BUILD_LIST applied; FFmpeg/GStreamer/V4L/HDF5/VTK/GDAL/GeoTIFF/Tesseract/FreeType disabled." ; \
@@ -133,8 +136,7 @@ RUN if [ "${PORTABLE}" = "1" ]; then \
       # Overlay the stub core_cuda_c.cpp (see Dockerfile.x64 for rationale). \
       cp /patches/core_cuda_c.cpp.stub /work/emgucv/Emgu.CV.Extern/core/core_cuda_c.cpp ; \
       echo "Replaced Emgu.CV.Extern/core/core_cuda_c.cpp with safe stub." ; \
-      # Remove imgcodecs wrapper — see Dockerfile.x64 for rationale. \
-      rm -rf /work/emgucv/Emgu.CV.Extern/imgcodecs ; \
+      # imgcodecs wrapper is kept (module is built now; it exports cveImread). \
       # Patch cuda throw stubs to no-ops — see Dockerfile.x64 for rationale. \
       find /work/emgucv/Emgu.CV.Extern -type d -name 'cuda*' | while read d; do \
         for h in "$d"/*_c.h; do \
@@ -142,10 +144,14 @@ RUN if [ "${PORTABLE}" = "1" ]; then \
           sed -i 's|CV_NORETURN ||g; s|CV_Error([^)]*);|/* defensive no-op */;|g' "$h"; \
         done; \
       done ; \
-      # Patch OpenCV's internal throw_no_cuda() — see Dockerfile.x64 for rationale. \
-      sed -i 's|CV_NORETURN void throw_no_cuda() { CV_Error([^)]*); }|void throw_no_cuda() { /* defensive no-op */ }|g' \
-        /work/emgucv/opencv/modules/core/include/opencv2/core/private.cuda.hpp ; \
-      echo "Patched Feature2D forward decls; removed imgcodecs wrapper; neutralized Emgu + OpenCV-internal cuda throw stubs." ; \
+      # Patch OpenCV's internal throw_no_cuda() (OpenCV 5: core/private/cuda_stubs.hpp) \
+      # and fail if it didn't apply — see Dockerfile.x64 for rationale. \
+      CUDA_STUBS=/work/emgucv/opencv/modules/core/include/opencv2/core/private/cuda_stubs.hpp ; \
+      sed -i 's|CV_NORETURN void throw_no_cuda() { CV_Error([^)]*); }|void throw_no_cuda() { /* defensive no-op */ }|g' "$CUDA_STUBS" ; \
+      if grep -q 'CV_NORETURN void throw_no_cuda' "$CUDA_STUBS" || ! grep -q 'defensive no-op' "$CUDA_STUBS" ; then \
+        echo "ERROR: throw_no_cuda() patch did not apply to $CUDA_STUBS" ; exit 1 ; \
+      fi ; \
+      echo "Patched Feature2D forward decls; neutralized Emgu + OpenCV-internal cuda throw stubs." ; \
     fi
 
 # The bookworm configure ends with `cmake --build . --parallel 1 --target package`.
@@ -226,7 +232,12 @@ RUN set -e ; \
       echo "(no missing libs)" ; \
     fi ; \
     echo "=== EXPORTED SYMBOL COUNT ===" ; \
-    nm --dynamic --defined-only libcvextern.so | wc -l
+    nm --dynamic --defined-only libcvextern.so | wc -l ; \
+    # Mat(filename) needs cveImread — see Dockerfile.x64. \
+    if ! nm --dynamic --defined-only libcvextern.so | grep -qw cveImread ; then \
+      echo "!!! ERROR: libcvextern.so does not export cveImread (imgcodecs wrapper missing)" ; exit 1 ; \
+    fi ; \
+    echo "(cveImread exported)"
 
 FROM scratch AS export
 COPY --from=builder /work/emgucv/libs/runtimes/linux-arm/native/libcvextern.so /libcvextern.so

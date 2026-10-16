@@ -35,6 +35,12 @@
 //  This is only used when PORTABLE=1 (the default in build.ps1 / build.sh).
 //  For a real CUDA-enabled build (PORTABLE=0 + WITH_CUDA=ON), the original
 //  source file is kept.
+//
+//  Matches Emgu 5.0.0's core_cuda_c.h. OpenCV 5 removed the C API types, so
+//  the header now takes cv::Size / cv::Scalar / cv::Rect where 4.x took
+//  CvSize / CvScalar / CvRect, and dropped gpuMatIsContinuous, gpuMatIsEmpty,
+//  gpuMatGetChannels/Type/Depth and cudaConvertFp16. When bumping Emgu, diff
+//  Emgu.CV.Extern/core/core_cuda_c.h against this file first.
 //----------------------------------------------------------------------------
 
 #include "core_cuda_c.h"
@@ -128,26 +134,20 @@ cv::cuda::GpuMat* gpuMatCreateDefault()                                         
 cv::cuda::GpuMat* gpuMatCreateFromData(int, int, int, void*, int)                         { return nullptr; }
 void              gpuMatCreate(cv::cuda::GpuMat*, int, int, int)                           { }
 cv::cuda::GpuMat* gpuMatCreateContinuous(int, int, int)                                    { return nullptr; }
-bool              gpuMatIsContinuous(cv::cuda::GpuMat*)                                    { return false; }
 cv::cuda::GpuMat* gpuMatGetRegion(cv::cuda::GpuMat*, cv::Range*, cv::Range*)               { return nullptr; }
 void              gpuMatRelease(cv::cuda::GpuMat** mat)                                    { if (mat) *mat = nullptr; }
 cv::cuda::GpuMat* gpuMatCreateFromInputArray(cv::_InputArray*)                             { return nullptr; }
 
-void gpuMatGetSize(cv::cuda::GpuMat*, CvSize* size)
+void gpuMatGetSize(cv::cuda::GpuMat*, cv::Size* size)
 {
     if (size) { size->width = 0; size->height = 0; }
 }
-
-bool gpuMatIsEmpty(cv::cuda::GpuMat*)        { return true; }
-int  gpuMatGetChannels(cv::cuda::GpuMat*)    { return 0; }
-int  gpuMatGetType(cv::cuda::GpuMat*)        { return 0; }
-int  gpuMatGetDepth(cv::cuda::GpuMat*)       { return 0; }
 
 void gpuMatUpload  (cv::cuda::GpuMat*, cv::_InputArray*,  cv::cuda::Stream*) { }
 void gpuMatDownload(cv::cuda::GpuMat*, cv::_OutputArray*, cv::cuda::Stream*) { }
 void gpuMatConvertTo(const cv::cuda::GpuMat*, cv::_OutputArray*, int, double, double, cv::cuda::Stream*) { }
 void gpuMatCopyTo   (const cv::cuda::GpuMat*, cv::_OutputArray*, const cv::_InputArray*, cv::cuda::Stream*) { }
-void gpuMatSetTo    (cv::cuda::GpuMat*, const CvScalar*, cv::_InputArray*, cv::cuda::Stream*) { }
+void gpuMatSetTo    (cv::cuda::GpuMat*, const cv::Scalar*, cv::_InputArray*, cv::cuda::Stream*) { }
 void gpuMatReshape  (const cv::cuda::GpuMat*, cv::cuda::GpuMat*, int, int) { }
 
-cv::cuda::GpuMat* gpuMatGetSubRect(const cv::cuda::GpuMat*, CvRect*) { return nullptr; }
+cv::cuda::GpuMat* gpuMatGetSubRect(const cv::cuda::GpuMat*, cv::Rect*) { return nullptr; }

@@ -10,7 +10,7 @@
 #   .\build.ps1 -Arch arm64           # arm64 only (slow via QEMU)
 #   .\build.ps1 -Arch armhf           # 32-bit ARM / armv7 (slow via QEMU)
 #   .\build.ps1 -Arch all             # x64 + arm64 + armhf
-#   .\build.ps1 -EmguTag 4.12.0       # override the emgucv git tag
+#   .\build.ps1 -EmguTag 5.0.0       # override the emgucv git tag
 #   .\build.ps1 -BuildType core       # override Emgu's build profile (full|core|mini)
 
 [CmdletBinding()]
@@ -18,7 +18,7 @@ param(
     [ValidateSet('both','x64','arm64','armhf','all')]
     [string]$Arch = '',
 
-    [string]$EmguTag = '4.12.0',
+    [string]$EmguTag = '5.0.0',
 
     [ValidateSet('full','core','mini')]
     [string]$BuildType = 'full',
@@ -45,7 +45,7 @@ if (-not $Arch) {
     Write-Host "  all     x64 + arm64 + armhf"
     Write-Host ""
     Write-Host "Options:"
-    Write-Host "  -EmguTag   <tag>          Emgu CV git tag           (default: 4.12.0)"
+    Write-Host "  -EmguTag   <tag>          Emgu CV git tag           (default: 5.0.0)"
     Write-Host "  -BuildType full|core|mini Emgu build profile        (default: full)"
     Write-Host "  -Jobs      <n>            Parallel make jobs        (default: all cores)"
     Write-Host "  -Portable                 AgentDVR-minimal patches  (default: on)"
@@ -53,7 +53,7 @@ if (-not $Arch) {
     Write-Host ""
     Write-Host "Examples:"
     Write-Host "  .\build.ps1 -Arch x64"
-    Write-Host "  .\build.ps1 -Arch all -EmguTag 4.12.0"
+    Write-Host "  .\build.ps1 -Arch all -EmguTag 5.0.0"
     Write-Host "  .\build.ps1 -Arch arm64 -Jobs 8"
     Write-Host ""
     exit 0

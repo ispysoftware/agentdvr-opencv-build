@@ -12,8 +12,9 @@
 
 FROM debian:buster AS builder
 
-# Tag in the emgucv repo. The NuGet revision .5764 is package-only; the git tag is 4.12.0.
-ARG EMGU_TAG=4.12.0
+# Tag in the emgucv repo. The NuGet revision .6584 is package-only; the git tag is 5.0.0.
+# Emgu 5.0 wraps OpenCV 5.0 — module names differ from 4.x (see BUILD_LIST below).
+ARG EMGU_TAG=5.0.0
 # Build profile passed to Emgu's cmake_configure: full | core | mini
 ARG BUILD_TYPE=full
 # Parallel make jobs (default: all cores)
@@ -52,7 +53,8 @@ COPY patches/ /patches/
 #   libvtk9-dev     -> libvtk6-dev       (VTK9 first appeared in Bullseye; Buster ships VTK6)
 #   libopengl-dev   -> libgl1-mesa-dev   (libopengl-dev split not backported to Buster)
 # ocl-icd-dev omitted: PORTABLE=1 disables OpenCL; package name also differs in Buster.
-# Buster ships cmake 3.13; EmguCV 4.12 requires 3.16 (upgraded via pip3 below).
+# Buster ships cmake 3.13; EmguCV 5.0 requires 3.16 (cmake.org binary installed below).
+# Buster's GCC 8.3 is OpenCV 5's stated compiler floor, so the glibc 2.28 floor survives 5.0.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl wget gnupg lsb-release \
       git build-essential cmake pkg-config file binutils python3 ccache \
@@ -86,7 +88,7 @@ RUN wget -q https://dot.net/v1/dotnet-install.sh -O /tmp/dotnet-install.sh \
  && rm /tmp/dotnet-install.sh \
  && dotnet --version
 
-# Buster ships cmake 3.13 but EmguCV 4.12 requires cmake >= 3.16.
+# Buster ships cmake 3.13 but EmguCV 5.0 requires cmake >= 3.16.
 # Download cmake 3.28 binary from cmake.org (glibc 2.17 floor — runs fine on Buster).
 # Avoids pip/Python version issues: cmake 4.x has no Python 3.7 wheels (Buster) and
 # building from source is a circular dependency.
@@ -126,7 +128,20 @@ RUN git submodule update --init --depth 1 --recursive -- \
 WORKDIR /work/emgucv/platforms/debian/bookworm
 
 # AgentDVR-minimal build: strip OpenCV to only the modules AgentDVR uses + disable unused features.
-# BUILD_LIST whitelist: core, imgproc, calib3d, features2d, flann, video, objdetect, tracking, plot, bgsegm.
+# BUILD_LIST whitelist (OpenCV 5 names): core, imgproc, geometry, flann, features, calib, stereo,
+# objdetect, video, imgcodecs, xobjdetect, tracking, plot, bgsegm.
+#   OpenCV 5 renamed features2d -> features and split calib3d into geometry / calib / stereo.
+#   imgproc depends on geometry, which depends on flann.
+#   xobjdetect (contrib) now holds CascadeClassifier + HOGDescriptor (ObjectFinder / PeopleFinder);
+#     it hard-depends on imgcodecs and features.
+#   calib: Emgu still wraps CvInvoke.EstimateAffinePartial2D (face alignment) in calib_c.cpp
+#     under HAVE_OPENCV_CALIB, even though OpenCV moved the function itself to geometry.
+#     calib pulls in objdetect and stereo.
+#   imgcodecs: needed by xobjdetect, and hosts Emgu's cveImread (Mat(filename) in
+#     Camera.GetAlertFrame). JPEG is the only codec enabled, from OpenCV's bundled
+#     libjpeg-turbo (BUILD_JPEG) so it links statically — no libjpeg.so runtime dep. Without
+#     nasm on PATH libjpeg-turbo skips its x86 SIMD code (non-fatal; scalar decode is fine for
+#     the occasional alert frame).
 #
 # CRITICAL: WITH_*=OFF flags below are what actually prevent unwanted runtime .so dependencies.
 # BUILD_*=FALSE only controls whether OpenCV builds its bundled copy of a 3rd-party lib;
@@ -140,7 +155,8 @@ WORKDIR /work/emgucv/platforms/debian/bookworm
 #   HDF5 / opencv_hdf                   -> libhdf5_serial.so.103 dep gone
 #   VTK                                 -> libvtk*.so.X deps gone
 #   GDAL / TIFF / EMGU_CV_WITH_TIFF     -> libgeotiff.so.5, libtiff.so.5 deps gone
-#   JPEG / PNG / WEBP / OPENEXR / JASPER / OPENJPEG -> all imgcodecs format libs (module disabled anyway)
+#   PNG / WEBP / OPENEXR / JASPER / OPENJPEG / AVIF / JPEGXL -> imgcodecs format libs (JPEG only, bundled)
+#   UNIFONT                             -> skips downloading + embedding a ~4 MB CJK font for putText
 #   VA / VA_INTEL                       -> libva.so.2, libva-drm.so.2 deps gone
 #   1394                                -> libdc1394 dep gone
 #   FREETYPE / harfbuzz                 -> libfreetype.so, libharfbuzz.so deps gone
@@ -167,10 +183,16 @@ WORKDIR /work/emgucv/platforms/debian/bookworm
 # allows forward decl + full def in the same TU), and pointer-typed function signatures only
 # need a forward decl to compile.
 RUN if [ "${PORTABLE}" = "1" ]; then \
-      sed -i 's|-DBUILD_TESTS:BOOL=FALSE|-DBUILD_TESTS:BOOL=FALSE -DBUILD_LIST=core,imgproc,calib3d,features2d,flann,video,objdetect,tracking,plot,bgsegm -DWITH_FFMPEG:BOOL=OFF -DWITH_GSTREAMER:BOOL=OFF -DWITH_V4L:BOOL=OFF -DWITH_LIBV4L:BOOL=OFF -DWITH_HDF5:BOOL=OFF -DWITH_VTK:BOOL=OFF -DWITH_GDAL:BOOL=OFF -DWITH_TIFF:BOOL=OFF -DWITH_JPEG:BOOL=OFF -DWITH_PNG:BOOL=OFF -DWITH_WEBP:BOOL=OFF -DWITH_OPENEXR:BOOL=OFF -DWITH_JASPER:BOOL=OFF -DWITH_OPENJPEG:BOOL=OFF -DWITH_VA:BOOL=OFF -DWITH_VA_INTEL:BOOL=OFF -DWITH_1394:BOOL=OFF -DWITH_FREETYPE:BOOL=OFF -DWITH_GTK:BOOL=OFF -DWITH_GTK_2_X:BOOL=OFF -DWITH_QT:BOOL=OFF -DWITH_OPENGL:BOOL=OFF -DWITH_PROTOBUF:BOOL=OFF -DWITH_ADE:BOOL=OFF -DWITH_OBSENSOR:BOOL=OFF -DBUILD_opencv_hdf:BOOL=OFF -DEMGU_CV_WITH_TIFF:BOOL=FALSE -DWITH_IPP:BOOL=OFF -DWITH_OPENCL:BOOL=OFF -DWITH_LAPACK:BOOL=OFF -DWITH_TBB:BOOL=OFF -DWITH_QUIRC:BOOL=OFF -DWITH_ITT:BOOL=OFF -DBUILD_IPP_IW:BOOL=OFF -DBUILD_ITT:BOOL=OFF -DCPU_BASELINE=SSE3 -DCPU_DISPATCH="SSSE3,SSE4_1,POPCNT,SSE4_2,AVX,FP16,AVX2,AVX_512F,AVX512_SKX"|' cmake_configure ; \
-      sed -i 's|-DBUILD_PNG:BOOL=TRUE|-DBUILD_PNG:BOOL=FALSE|g; s|-DBUILD_JPEG:BOOL=TRUE|-DBUILD_JPEG:BOOL=FALSE|g; s|-DBUILD_TIFF:BOOL=TRUE|-DBUILD_TIFF:BOOL=FALSE|g; s|-DBUILD_WEBP:BOOL=TRUE|-DBUILD_WEBP:BOOL=FALSE|g; s|-DBUILD_JASPER:BOOL=TRUE|-DBUILD_JASPER:BOOL=FALSE|g; s|-DBUILD_OPENEXR:BOOL=TRUE|-DBUILD_OPENEXR:BOOL=FALSE|g' cmake_configure ; \
+      sed -i 's|-DBUILD_TESTS:BOOL=FALSE|-DBUILD_TESTS:BOOL=FALSE -DBUILD_LIST=core,imgproc,geometry,flann,features,calib,stereo,objdetect,video,imgcodecs,xobjdetect,tracking,plot,bgsegm -DWITH_FFMPEG:BOOL=OFF -DWITH_GSTREAMER:BOOL=OFF -DWITH_V4L:BOOL=OFF -DWITH_LIBV4L:BOOL=OFF -DWITH_HDF5:BOOL=OFF -DWITH_VTK:BOOL=OFF -DWITH_GDAL:BOOL=OFF -DWITH_TIFF:BOOL=OFF -DWITH_JPEG:BOOL=ON -DWITH_PNG:BOOL=OFF -DWITH_WEBP:BOOL=OFF -DWITH_OPENEXR:BOOL=OFF -DWITH_JASPER:BOOL=OFF -DWITH_OPENJPEG:BOOL=OFF -DWITH_AVIF:BOOL=OFF -DWITH_JPEGXL:BOOL=OFF -DWITH_UNIFONT:BOOL=OFF -DWITH_VA:BOOL=OFF -DWITH_VA_INTEL:BOOL=OFF -DWITH_1394:BOOL=OFF -DWITH_FREETYPE:BOOL=OFF -DWITH_GTK:BOOL=OFF -DWITH_GTK_2_X:BOOL=OFF -DWITH_QT:BOOL=OFF -DWITH_OPENGL:BOOL=OFF -DWITH_PROTOBUF:BOOL=OFF -DWITH_ADE:BOOL=OFF -DWITH_OBSENSOR:BOOL=OFF -DBUILD_opencv_hdf:BOOL=OFF -DEMGU_CV_WITH_TIFF:BOOL=FALSE -DWITH_IPP:BOOL=OFF -DWITH_OPENCL:BOOL=OFF -DWITH_LAPACK:BOOL=OFF -DWITH_TBB:BOOL=OFF -DWITH_QUIRC:BOOL=OFF -DWITH_ITT:BOOL=OFF -DBUILD_IPP_IW:BOOL=OFF -DBUILD_ITT:BOOL=OFF -DCPU_BASELINE=SSE3 -DCPU_DISPATCH="SSSE3,SSE4_1,POPCNT,SSE4_2,AVX,FP16,AVX2,AVX_512F,AVX512_SKX"|' cmake_configure ; \
+      # BUILD_JPEG stays TRUE (cmake_configure passes -DBUILD_JPEG:BOOL=TRUE after our flags; \
+      # last-wins) so the bundled libjpeg-turbo is used instead of a system libjpeg. \
+      sed -i 's|-DBUILD_PNG:BOOL=TRUE|-DBUILD_PNG:BOOL=FALSE|g; s|-DBUILD_TIFF:BOOL=TRUE|-DBUILD_TIFF:BOOL=FALSE|g; s|-DBUILD_WEBP:BOOL=TRUE|-DBUILD_WEBP:BOOL=FALSE|g; s|-DBUILD_JASPER:BOOL=TRUE|-DBUILD_JASPER:BOOL=FALSE|g; s|-DBUILD_OPENEXR:BOOL=TRUE|-DBUILD_OPENEXR:BOOL=FALSE|g' cmake_configure ; \
+      grep -q -- '-DBUILD_JPEG:BOOL=TRUE' cmake_configure || { echo "ERROR: cmake_configure no longer sets -DBUILD_JPEG:BOOL=TRUE; add it to the injected flags." ; exit 1 ; } ; \
+      # Emgu 5's full profile adds -DWITH_GSTREAMER:BOOL=TRUE inside CONTRIB_OPTION, after our \
+      # injected flags; the global sed below flips it back. \
       sed -i 's|-DWITH_VTK:BOOL=TRUE|-DWITH_VTK:BOOL=FALSE|g; s|-DWITH_GSTREAMER:BOOL=TRUE|-DWITH_GSTREAMER:BOOL=FALSE|g' cmake_configure ; \
       sed -i 's|EMGU_CV_WITH_TESSERACT:BOOL=TRUE|EMGU_CV_WITH_TESSERACT:BOOL=FALSE|g; s|EMGU_CV_WITH_FREETYPE:BOOL=TRUE|EMGU_CV_WITH_FREETYPE:BOOL=FALSE|g' cmake_configure ; \
+      # (Emgu 5 already comments out the stitching_c.h stub; that sed is a harmless no-op now.) \
       sed -i 's|class Feature2D {};|class Feature2D;|g' /work/emgucv/Emgu.CV.Extern/stitching/stitching_c.h ; \
       sed -i 's|class Feature2D {};|class Feature2D;|g' /work/emgucv/Emgu.CV.Extern/xfeatures2d/nonfree_c.h ; \
       \
@@ -182,12 +204,8 @@ RUN if [ "${PORTABLE}" = "1" ]; then \
       cp /patches/core_cuda_c.cpp.stub /work/emgucv/Emgu.CV.Extern/core/core_cuda_c.cpp ; \
       echo "Replaced Emgu.CV.Extern/core/core_cuda_c.cpp with safe stub." ; \
       \
-      # Remove the imgcodecs Emgu wrapper subdir entirely — its imgcodecs_c_extra.cpp \
-      # references cv::Animation which only exists in the (disabled) imgcodecs module. \
-      # No other Emgu wrapper imports imgcodecs headers, and no CREATE_OCV_CLASS_PROPERTY \
-      # call regenerates files in imgcodecs/, so the rm sticks. AgentDVR uses .NET for \
-      # image I/O, not OpenCV. \
-      rm -rf /work/emgucv/Emgu.CV.Extern/imgcodecs ; \
+      # Emgu.CV.Extern/imgcodecs is no longer deleted: the imgcodecs module is built now \
+      # (xobjdetect needs it), so cv::Animation exists, and the wrapper exports cveImread. \
       \
       # CUDA defensive patch: cuda* wrapper subdirs stay in place (3 CREATE_OCV_CLASS_PROPERTY \
       # calls regenerate property files in cuda*/, so rm -rf doesn't work). Instead, patch \
@@ -211,16 +229,20 @@ RUN if [ "${PORTABLE}" = "1" ]; then \
       done ; \
       echo "Patched Emgu cuda throw_no_cuda* stubs to silent no-ops." ; \
       \
-      # ALSO patch OpenCV's INTERNAL throw_no_cuda() in private.cuda.hpp. This is the one \
-      # actually firing in production: Emgu's core_cuda_c.cpp (cudaSetDevice, cudaGetDevice) \
-      # directly invokes cv::cuda::setDevice / cv::cuda::getDevice in OpenCV core, which call \
-      # this internal throw_no_cuda(). The Emgu layer patch alone doesn't catch this path. \
-      # Both definitions (HAVE_CUDA undef and the HAVE_CUDA-defined fallback) get neutralized. \
-      sed -i 's|CV_NORETURN void throw_no_cuda() { CV_Error([^)]*); }|void throw_no_cuda() { /* defensive no-op */ }|g' \
-        /work/emgucv/opencv/modules/core/include/opencv2/core/private.cuda.hpp ; \
-      echo "Patched OpenCV internal throw_no_cuda() in opencv/modules/core/include/opencv2/core/private.cuda.hpp." ; \
+      # ALSO patch OpenCV's INTERNAL throw_no_cuda(). This is the one actually firing in \
+      # production: OpenCV core's cv::cuda::setDevice / getDevice etc call it directly, so the \
+      # Emgu layer patch alone doesn't catch this path. Both definitions (HAVE_CUDA undef and \
+      # the HAVE_CUDA-defined fallback) get neutralized. OpenCV 5 moved it from \
+      # core/private.cuda.hpp to core/private/cuda_stubs.hpp. sed exits 0 when nothing \
+      # matches, so the grep afterwards fails the build if the patch silently stopped applying. \
+      CUDA_STUBS=/work/emgucv/opencv/modules/core/include/opencv2/core/private/cuda_stubs.hpp ; \
+      sed -i 's|CV_NORETURN void throw_no_cuda() { CV_Error([^)]*); }|void throw_no_cuda() { /* defensive no-op */ }|g' "$CUDA_STUBS" ; \
+      if grep -q 'CV_NORETURN void throw_no_cuda' "$CUDA_STUBS" || ! grep -q 'defensive no-op' "$CUDA_STUBS" ; then \
+        echo "ERROR: throw_no_cuda() patch did not apply to $CUDA_STUBS" ; exit 1 ; \
+      fi ; \
+      echo "Patched OpenCV internal throw_no_cuda() in $CUDA_STUBS." ; \
       \
-      echo "AgentDVR-minimal build: BUILD_LIST applied; unused features disabled; Feature2D stubs forward-decl'd; imgcodecs wrapper removed; cuda throws neutralized." ; \
+      echo "AgentDVR-minimal build: BUILD_LIST applied; unused features disabled; Feature2D stubs forward-decl'd; cuda throws neutralized." ; \
     fi
 
 # Run configure (which also kicks off `make`). MAKEFLAGS must be set inside RUN so $(nproc) expands.
@@ -310,7 +332,12 @@ RUN set -e ; \
       echo "(no missing libs)" ; \
     fi ; \
     echo "=== EXPORTED SYMBOL COUNT ===" ; \
-    nm --dynamic --defined-only libcvextern.so | wc -l
+    nm --dynamic --defined-only libcvextern.so | wc -l ; \
+    # Mat(filename) in Camera.GetAlertFrame needs cveImread (Emgu imgcodecs wrapper). \
+    if ! nm --dynamic --defined-only libcvextern.so | grep -qw cveImread ; then \
+      echo "!!! ERROR: libcvextern.so does not export cveImread (imgcodecs wrapper missing)" ; exit 1 ; \
+    fi ; \
+    echo "(cveImread exported)"
 
 # ---- Export stage (scratch image holding only the artifact) ---------------
 FROM scratch AS export

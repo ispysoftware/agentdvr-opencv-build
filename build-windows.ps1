@@ -3,13 +3,13 @@
 # Native MSVC build (no Docker). Runs cmake with the Visual Studio generator + builds the
 # `cvextern` target only (skips Emgu's managed projects, OpenCV docs, perf tests, etc.).
 #
-# Applies the same patches as Dockerfile.x64: 10-module BUILD_LIST, all WITH_* disables,
-# CPU_DISPATCH limit, Feature2D forward-decl fix, imgcodecs wrapper removal, cuda throw
-# neutralization. Output: ./out/win-x64/cvextern.dll + ./out/win-x64.zip.
+# Applies the same patches as Dockerfile.x64: OpenCV 5 BUILD_LIST, all WITH_* disables
+# (JPEG only, bundled), CPU_DISPATCH limit, Feature2D forward-decl fix, core_cuda_c stub.
+# Output: ./out/win-x64/cvextern.dll + ./out/win-x64.zip.
 #
 # Usage:
-#   .\build-windows.ps1                          # default: tag 4.12.0, VS 2022, all cores
-#   .\build-windows.ps1 -EmguTag 4.12.0          # pin to a specific Emgu tag
+#   .\build-windows.ps1                          # default: tag 5.0.0, VS 2022, all cores
+#   .\build-windows.ps1 -EmguTag 5.0.0           # pin to a specific Emgu tag
 #   .\build-windows.ps1 -VsVersion 2019          # use VS 2019 instead
 #   .\build-windows.ps1 -Jobs 8                  # limit parallelism
 #   .\build-windows.ps1 -Portable:$false         # disable the minimal patches; build Emgu's full default
@@ -18,10 +18,11 @@
 #
 # Source clone lands at ./src/emgucv by default. ~5-7 GB on disk after build.
 # Reuses across runs -- second build skips the clone and only recompiles changed files.
+# A clone of a different tag is refused (delete ./src/emgucv to switch tags).
 
 [CmdletBinding()]
 param(
-    [string]$EmguTag = '4.12.0',
+    [string]$EmguTag = '5.0.0',
 
     [ValidateSet('2022','2019')]
     [string]$VsVersion = '2022',
@@ -116,13 +117,16 @@ if (-not (Test-Path $WorkDir)) { New-Item -ItemType Directory -Path $WorkDir | O
 $srcDir = Join-Path $WorkDir "emgucv"
 if (-not (Test-Path $srcDir)) {
     Write-Section "Cloning emgucv at tag $EmguTag"
-    & git clone --depth 1 --branch $EmguTag https://github.com/emgucv/emgucv.git $srcDir
+    # core.longpaths: OpenCV 5 moved gapi into opencv_contrib, and some of its sample paths
+    # exceed MAX_PATH ("Filename too long" on checkout). -c propagates to the submodule clones.
+    & git -c core.longpaths=true clone --depth 1 --branch $EmguTag https://github.com/emgucv/emgucv.git $srcDir
     if ($LASTEXITCODE -ne 0) { Die "git clone failed" }
+    & git -C $srcDir config core.longpaths true
 
     Write-Section "Initializing submodules"
     Push-Location $srcDir
     try {
-        & git submodule update --init --depth 1 --recursive `
+        & git -c core.longpaths=true submodule update --init --depth 1 --recursive `
             -- opencv opencv_contrib opencv_extra eigen harfbuzz hdf5 vtk `
             3rdParty/freetype2 `
             Emgu.CV.Extern/tesseract/libtesseract/tesseract-ocr.git `
@@ -132,7 +136,21 @@ if (-not (Test-Path $srcDir)) {
         Pop-Location
     }
 } else {
-    Write-Host "Source directory already exists, reusing: $srcDir"
+    # The clone is reused as-is, so a stale clone of another tag would silently build the
+    # old version. Refuse instead of deleting ~5-7 GB on the user's behalf.
+    # EAP Continue: Windows PowerShell 5.1 turns git's stderr into a terminating error under Stop.
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $clonedTag = (& git -C $srcDir describe --tags --exact-match HEAD 2>$null)
+        if ($LASTEXITCODE -ne 0 -or -not $clonedTag) { $clonedTag = '(unknown)' }
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+    if ($clonedTag -ne $EmguTag) {
+        Die "Existing source at $srcDir is Emgu tag $clonedTag, not $EmguTag. Delete that folder (or pass -WorkDir) and re-run."
+    }
+    Write-Host "Source directory already exists at tag $clonedTag, reusing: $srcDir"
 }
 
 # ---- Apply patches -------------------------------------------------------
@@ -146,12 +164,13 @@ if ($Portable) {
     $prevEAP = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        # opencv submodule -- has its own .git dir, files only resolvable from within
+        # opencv submodule -- has its own .git dir, files only resolvable from within.
+        # (OpenCV 5 moved throw_no_cuda() from core/private.cuda.hpp to core/private/cuda_stubs.hpp.)
         $opencvDir = Join-Path $srcDir 'opencv'
         if (Test-Path (Join-Path $opencvDir '.git')) {
             Push-Location $opencvDir
             try {
-                & git checkout HEAD -- 'modules/core/include/opencv2/core/private.cuda.hpp' 2>&1 | Out-Null
+                & git checkout HEAD -- 'modules/core/include/opencv2/core/private/cuda_stubs.hpp' 2>&1 | Out-Null
             } finally { Pop-Location }
         }
 
@@ -187,7 +206,8 @@ if ($Portable) {
     }
 
     # Feature2D stub: empty class def -> forward decl (avoids collision with the real cv::Feature2D
-    # from features2d.hpp when both end up in the same translation unit via generated headers).
+    # when both end up in the same translation unit via generated headers). Emgu 5 already
+    # comments out the stitching_c.h stub, so that one is a no-op now; nonfree_c.h still needs it.
     foreach ($relPath in @('Emgu.CV.Extern/stitching/stitching_c.h',
                            'Emgu.CV.Extern/xfeatures2d/nonfree_c.h')) {
         $f = Join-Path $srcDir $relPath
@@ -198,13 +218,8 @@ if ($Portable) {
         }
     }
 
-    # Remove imgcodecs Emgu wrapper (imgcodecs_c_extra.cpp references cv::Animation which only
-    # exists in the built imgcodecs module; AgentDVR uses .NET for image I/O anyway).
-    $imgcodecsDir = Join-Path $srcDir 'Emgu.CV.Extern/imgcodecs'
-    if (Test-Path $imgcodecsDir) {
-        Remove-Item -Recurse -Force $imgcodecsDir
-        Write-Host "  Removed Emgu.CV.Extern/imgcodecs wrapper subdir"
-    }
+    # Emgu.CV.Extern/imgcodecs is no longer removed: the imgcodecs module is built now
+    # (xobjdetect needs it), and the wrapper exports cveImread for Mat(filename).
 
     # NOTE: We deliberately do NOT neutralize the throw_no_cuda() function on Windows the
     # way the Linux Dockerfiles do. Reasons:
@@ -221,7 +236,7 @@ if ($Portable) {
     #    .NET doesn't have SEH, which is why the Linux Dockerfile aggressively neutralizes
     #    these throws -- but that's not a Windows problem.
     #
-    # So on Windows: leave Emgu's cuda*/_c.h and OpenCV's private.cuda.hpp untouched. The
+    # So on Windows: leave Emgu's cuda*/_c.h and OpenCV's cuda_stubs.hpp untouched. The
     # throws fire normally, get translated to managed CvException, and AgentDVR can catch
     # them. The core_cuda_c.cpp stub (below) still applies cross-platform because that one
     # bypasses CV_Assert -- assertions are not catchable C++ exceptions the same way.
@@ -320,7 +335,8 @@ if ($Portable) {
     $contribPath = (Join-Path $srcDir 'opencv_contrib/modules') -replace '\\', '/'
     $cacheLines += @(
         '# AgentDVR-minimal portable build flags',
-        'set(BUILD_LIST "core,imgproc,calib3d,features2d,flann,video,objdetect,tracking,plot,bgsegm" CACHE STRING "")',
+        '# OpenCV 5 module names -- see Dockerfile.x64 for why each module is in the list.',
+        'set(BUILD_LIST "core,imgproc,geometry,flann,features,calib,stereo,objdetect,video,imgcodecs,xobjdetect,tracking,plot,bgsegm" CACHE STRING "")',
         "set(OPENCV_EXTRA_MODULES_PATH `"$contribPath`" CACHE PATH `"`")",
         'set(WITH_FFMPEG OFF CACHE BOOL "")',
         'set(WITH_GSTREAMER OFF CACHE BOOL "")',
@@ -340,11 +356,26 @@ if ($Portable) {
         'set(EMGU_CV_WITH_TIFF FALSE CACHE BOOL "")',
         'set(EMGU_CV_WITH_TESSERACT FALSE CACHE BOOL "")',
         'set(EMGU_CV_WITH_FREETYPE FALSE CACHE BOOL "")',
+        '# imgcodecs is built now: JPEG only, from the bundled libjpeg-turbo (static, so no extra',
+        '# DLL). Without nasm on PATH it builds without SIMD, which is fine for alert frames.',
+        '# Every other format is off; on WIN32 OpenCV defaults most BUILD_* to ON.',
+        'set(WITH_JPEG ON CACHE BOOL "")',
+        'set(BUILD_JPEG ON CACHE BOOL "")',
+        'set(WITH_PNG OFF CACHE BOOL "")',
+        'set(WITH_TIFF OFF CACHE BOOL "")',
+        'set(WITH_WEBP OFF CACHE BOOL "")',
+        'set(WITH_OPENEXR OFF CACHE BOOL "")',
+        'set(WITH_JASPER OFF CACHE BOOL "")',
+        'set(WITH_OPENJPEG OFF CACHE BOOL "")',
+        'set(WITH_AVIF OFF CACHE BOOL "")',
+        'set(WITH_JPEGXL OFF CACHE BOOL "")',
+        '# UNIFONT downloads and embeds a ~4 MB CJK font for putText; AgentDVR draws its own text.',
+        'set(WITH_UNIFONT OFF CACHE BOOL "")',
         'set(BUILD_PNG OFF CACHE BOOL "")',
-        'set(BUILD_JPEG OFF CACHE BOOL "")',
         'set(BUILD_TIFF OFF CACHE BOOL "")',
         'set(BUILD_WEBP OFF CACHE BOOL "")',
         'set(BUILD_JASPER OFF CACHE BOOL "")',
+        'set(BUILD_OPENJPEG OFF CACHE BOOL "")',
         'set(BUILD_OPENEXR OFF CACHE BOOL "")',
         '# Baseline lowered SSE4_2 -> SSE3 so pre-SSE4.2 x86 CPUs (e.g. AMD K10) can run;',
         '# SSSE3/SSE4_1/POPCNT/SSE4_2 moved to dispatch so modern CPUs still pick them at runtime.',
@@ -466,8 +497,14 @@ Write-Host "cvextern.dll size: $sizeMB MB"
 
 # Optional: dumpbin /exports check if dumpbin is on PATH (it is when run from a VS dev prompt)
 if (Get-Command dumpbin -ErrorAction SilentlyContinue) {
-    $exports = & dumpbin /exports $finalDll 2>$null | Select-String 'CvInvoke|cve[A-Z]' | Measure-Object
+    $exportLines = & dumpbin /exports $finalDll 2>$null
+    $exports = $exportLines | Select-String 'CvInvoke|cve[A-Z]' | Measure-Object
     Write-Host "Exported symbols matching cve* / CvInvoke*: $($exports.Count)"
+    # Mat(filename) in Camera.GetAlertFrame needs cveImread (Emgu imgcodecs wrapper).
+    if (-not ($exportLines | Select-String '\bcveImread\b')) {
+        Die "cvextern.dll does not export cveImread -- the imgcodecs wrapper was not built."
+    }
+    Write-Host "cveImread exported (imgcodecs wrapper present)"
 }
 
 # ---- Zip -----------------------------------------------------------------
@@ -480,4 +517,4 @@ if (-not $SkipZip) {
 }
 
 Write-Section "Done"
-Write-Host "Upload $((Resolve-Path (Join-Path $OutDir 'win-x64.zip') -ErrorAction SilentlyContinue).Path) to https://files.ispyconnect.com/libs/opencv/$EmguTag.5764/ and bump OpenCvVersion in Dependencies.cs."
+Write-Host "Copy $((Resolve-Path $finalDll).Path) to agent-service\AgentCore\runtimes\win-x64\native\cvextern.dll -- together with the other platforms and the matching Emgu.CV PackageReference in CoreLogic.csproj (see README 'Wiring into AgentDVR')."

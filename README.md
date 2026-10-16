@@ -2,9 +2,11 @@
 
 This folder builds **Emgu CV's native binary** from source for the platforms AgentDVR ships, with the same module set and CUDA-defensive patches applied to each. The Linux builds use Docker; the Windows build uses native MSVC.
 
+Current target: **Emgu CV 5.0.0** (git tag `5.0.0`, NuGet `Emgu.CV` 5.0.0.6584), which wraps **OpenCV 5.0**. The managed `Emgu.CV` package version in `agent-service\CoreLogic\CoreLogic.csproj` must match the native binary — a 5.0 managed assembly against a 4.x `cvextern` fails with `EntryPointNotFoundException`, so ship both together.
+
 ## Why this exists
 
-Emgu's `Emgu.CV.runtime.ubuntu-x64` NuGet (4.12.0.5764) is built against glibc 2.38 (Ubuntu 24.04 base), so on Ubuntu 22.04 and older it fails to load with `GLIBC_2.38 not found`. Emgu doesn't publish a version-specific `ubuntu.22.04-x64` package. Building on a Debian Buster base lowers the glibc floor to **2.28**, which is compatible with Debian 10+, Ubuntu 18.10+, RHEL 8+, and all Raspberry Pi OS Buster images — the same floor as our FFmpeg builds.
+Emgu's `Emgu.CV.runtime.ubuntu-x64` NuGet (4.12.0.5764, when this was set up) is built against glibc 2.38 (Ubuntu 24.04 base), so on Ubuntu 22.04 and older it fails to load with `GLIBC_2.38 not found`. Emgu doesn't publish a version-specific `ubuntu.22.04-x64` package. Building on a Debian Buster base lowers the glibc floor to **2.28**, which is compatible with Debian 10+, Ubuntu 18.10+, RHEL 8+, and all Raspberry Pi OS Buster images — the same floor as our FFmpeg builds.
 
 Separately, when AgentDVR runs with ONNX Runtime's CUDA execution provider, **Emgu's `cv::cuda::*` wrapper stubs throw `cv::Exception` on Linux even though we're not built with CUDA** — C++ exceptions through P/Invoke on .NET/Linux is undefined behavior and crashes the process. The portable build neutralizes these stubs into no-ops. The same patch goes into the Windows build for consistency.
 
@@ -84,7 +86,7 @@ Use `build.ps1` on Windows — it runs in the current window and keeps all outpu
 .\build.ps1 -Arch all     # x64 + arm64 + armhf
 
 # Override Emgu git tag / build profile / parallelism
-.\build.ps1 -EmguTag 4.12.0 -BuildType full -Jobs 8
+.\build.ps1 -EmguTag 5.0.0 -BuildType full -Jobs 8
 ```
 
 ```bash
@@ -93,7 +95,7 @@ Use `build.ps1` on Windows — it runs in the current window and keeps all outpu
 ./build.sh arm64
 ./build.sh armhf
 ./build.sh all          # x64 + arm64 + armhf
-EMGU_TAG=4.12.0 BUILD_TYPE=full JOBS=8 ./build.sh
+EMGU_TAG=5.0.0 BUILD_TYPE=full JOBS=8 ./build.sh
 ```
 
 ### ARM builds via GitHub Actions (fast — no QEMU)
@@ -114,11 +116,11 @@ in 5-15 min per arch.
 ### Windows x64 build via native MSVC (`build-windows.ps1`)
 
 ```powershell
-# Default: tag 4.12.0, VS 2022, all cores, portable patches enabled
+# Default: tag 5.0.0, VS 2022, all cores, portable patches enabled
 .\build-windows.ps1
 
 # Override tag / VS version
-.\build-windows.ps1 -EmguTag 4.12.0 -VsVersion 2022
+.\build-windows.ps1 -EmguTag 5.0.0 -VsVersion 2022
 
 # Limit parallelism
 .\build-windows.ps1 -Jobs 8
@@ -128,6 +130,8 @@ in 5-15 min per arch.
 ```
 
 Expected first-run time: 45-90 min on a fast 8-core box. Subsequent runs are much faster — by default the clone goes to `./src` (a subfolder of this directory) and persists across invocations, so the git clone + submodule init steps are skipped and cmake's incremental build cache only rebuilds changed files. Override the workspace location with `-WorkDir`.
+
+**Switching Emgu tags:** the scripts refuse to reuse a clone of a different tag (they used to rebuild the old one silently). Delete `src\emgucv` — or pass a fresh `-WorkDir` / `WORK_DIR` — and re-run. The clone uses `core.longpaths=true` because OpenCV 5's contrib (`gapi` samples) has paths longer than `MAX_PATH`.
 
 The Windows build produces `out/win-x64/cvextern.dll`. If the build ever links against `libusb-1.0.dll` (it doesn't with the portable patches active, but might if you turn them off), the script also copies that into the output folder.
 
@@ -177,22 +181,29 @@ If the glibc floor comes back higher than 2.28, something in the build is callin
 
 ## Wiring into AgentDVR
 
-The managed `Dependencies.cs` downloader expects the `.so` files at:
+The binaries are **not uploaded anywhere** — they are checked into the agent-service repo and copied into every build from `AgentCore\runtimes\<rid>\native\`:
 
-```
-https://files.ispyconnect.com/libs/opencv/<OpenCvVersion>/linux-x64/libcvextern.so
-https://files.ispyconnect.com/libs/opencv/<OpenCvVersion>/linux-arm64/libcvextern.so
-https://files.ispyconnect.com/libs/opencv/<OpenCvVersion>/linux-arm/libcvextern.so
-```
+| Build output | Copy to (in `D:\Projects\agent-service\`) |
+| ------------ | ----------------------------------------- |
+| `out/win-x64/cvextern.dll` | `AgentCore\runtimes\win-x64\native\cvextern.dll` |
+| `out/linux-x64/libcvextern.so` | `AgentCore\runtimes\linux-x64\native\libcvextern.so` |
+| `out/linux-arm64/libcvextern.so` | `AgentCore\runtimes\linux-arm64\native\libcvextern.so` |
+| `out/linux-arm/libcvextern.so` | `AgentCore\runtimes\linux-arm\native\libcvextern.so` |
+| `out/macos-x64/libcvextern.dylib` | `AgentCore\runtimes\osx-x64\native\libcvextern.dylib` |
+| `out/macos-arm64/libcvextern.dylib` | `AgentCore\runtimes\osx-arm64\native\libcvextern.dylib` |
+
+From there:
+
+- **Debug builds** (Windows): `AgentCore.csproj`'s `CopyWindowsNatives` target xcopies `runtimes\win-x64\native\*.dll` into `bin\...\dlls\x64\`.
+- **Packages:** `AgentCore\Deploy\deploy.bat` copies `runtimes\<rid>\native\*` into `dlls\<arch>\` (Windows) or the package root (Linux / macOS).
 
 To roll a new version:
 
-1. Build all Linux targets: `.\build.ps1 -Arch all` (or `./build.sh all`).
-2. Upload the `.so` files from `out/linux-x64/`, `out/linux-arm64/`, and `out/linux-arm/` to the CDN under `libs/opencv/<new-version>/`.
-3. Bump `const string OpenCvVersion = "..."` in `D:\Projects\agent-service\SharedLogic\Dependencies.cs`.
-4. Existing installs will see the new version, blow away `.opencv_version`, and re-download.
+1. Build every target (Linux via Docker or the workflows, Windows via `build-windows.ps1`, macOS via `build-macos.sh` or the workflow).
+2. Copy the binaries into `AgentCore\runtimes\` per the table above, **all platforms in the same commit as** the `Emgu.CV` `PackageReference` bump in `CoreLogic\CoreLogic.csproj` — managed and native versions must match.
+3. Update the hand-maintained notices in `SharedContent\Licenses\components.json` (Emgu / OpenCV versions, and any library compiled into cvextern — e.g. libjpeg-turbo since 5.0).
 
-If you ever need a sibling lib alongside `libcvextern.so` (e.g. a custom `libgeotiff.so.5`), upload it to the same CDN path — the install code copies everything in that directory to `Statics.AppPath` and the dynamic loader will find it.
+If you ever need a sibling lib alongside `libcvextern.so` (e.g. a custom `libgeotiff.so.5`), put it in the same `runtimes\<rid>\native\` folder — `deploy.bat` copies the whole folder.
 
 ## Build profile (`-BuildType` / `BUILD_TYPE`)
 
@@ -202,30 +213,40 @@ This argument is forwarded directly to Emgu's `cmake_configure` script. **With `
 | ------- | ------------------------------------------------------------------------------- |
 | `full`  | Default. opencv_contrib + VTK + Tesseract + FreeType. ~30-40 MB.                |
 | `core`  | opencv core modules only, no contrib. ~15-20 MB. **NB: drops `tracking` — AgentDVR needs it, don't use this with `PORTABLE=0`.** |
-| `mini`  | Excludes dnn, ml, photo, features2d, calib3d, video, gapi, flann. No contrib. **Same warning as core.** |
+| `mini`  | Excludes calib, dnn, photo, features, video. No contrib. **Same warning as core.** |
 
 For AgentDVR, just stick with the default (`full` + `PORTABLE=1`) — the BUILD_LIST strip kicks in regardless.
 
 ## Portability flag (`-Portable` / `PORTABLE`)
 
-Default ON. Strips OpenCV down to **only the 10 modules AgentDVR actually uses** and disables optional features that pull in version-pinned or unused runtime `.so` dependencies.
+Default ON. Strips OpenCV down to **only the 14 modules AgentDVR actually uses (directly or as dependencies)** and disables optional features that pull in version-pinned or unused runtime `.so` dependencies.
 
 ### OpenCV module whitelist (via `BUILD_LIST`)
 
-Only these modules build. Everything else (dnn, ml, photo, stitching, gapi, highgui, world, imgcodecs, aruco, dnn_*, face, optflow, xfeatures2d, ximgproc, and ~30 other contrib modules) is skipped entirely. `imgcodecs` is dropped because AgentDVR uses .NET (System.Drawing / SkiaSharp) for image encoding/decoding, not OpenCV.
+Only these modules build. Everything else (dnn, ml, photo, stitching, gapi, highgui, world, dnn_*, face, optflow, xfeatures2d, ximgproc, and ~30 other contrib modules) is skipped entirely.
+
+OpenCV 5 renamed and split modules relative to 4.x: `features2d` → `features`, `calib3d` → `geometry` + `calib` + `stereo`, and `CascadeClassifier` / `HOGDescriptor` moved out of `objdetect` into contrib `xobjdetect`. The managed Emgu namespaces did not change.
 
 | Module | Type | AgentDVR usage |
 | ------ | ---- | -------------- |
 | `core` | main | foundational — mandatory |
 | `imgproc` | main | image processing primitives |
-| `calib3d` | main | required transitively by objdetect |
-| `features2d` | main | required by calib3d |
-| `flann` | main | required by calib3d |
-| `video` | main | motion analysis (MOG2 etc); required by tracking |
-| `objdetect` | main | CascadeClassifier, HOGDescriptor (PeopleFinder / ObjectFinder) |
+| `geometry` | main | required by imgproc; also hosts `GetPerspectiveTransform` (LPR) |
+| `flann` | main | required by geometry |
+| `features` | main | required by objdetect / xobjdetect |
+| `calib` | main | `CvInvoke.EstimateAffinePartial2D` (face alignment) — Emgu wraps it in `calib_c.cpp`, guarded by `HAVE_OPENCV_CALIB` |
+| `stereo` | main | required by calib |
+| `objdetect` | main | required by calib |
+| `video` | main | motion analysis (MOG2 etc); required by tracking / bgsegm |
+| `imgcodecs` | main | required by xobjdetect; Emgu's `cveImread` for `new Mat(filename)` (alert frames). JPEG only — see below |
+| `xobjdetect` | contrib | CascadeClassifier, HOGDescriptor (ObjectFinder / PeopleFinder) |
 | `tracking` | contrib | TrackerCSRT, TrackerMOSSE (TrackedObject) |
 | `plot` | contrib | required by tracking |
 | `bgsegm` | contrib | improved background subtraction (BackgroundSubtractorMOG/CNT/GMG — distinct from `video`'s MOG2) |
+
+### Image codecs
+
+`imgcodecs` is built with **JPEG only**, from OpenCV's bundled libjpeg-turbo (`WITH_JPEG=ON`, `BUILD_JPEG=ON`), so it is linked statically and adds no runtime library. Without `nasm` on the PATH, libjpeg-turbo builds without its x86 SIMD code — non-fatal, and scalar decode is plenty for alert frames. PNG / TIFF / WebP / OpenEXR / JPEG 2000 / AVIF / JPEG XL are all off. Every build script fails if the output doesn't export `cveImread`.
 
 ### Optional features disabled
 
@@ -237,6 +258,7 @@ Only these modules build. Everything else (dnn, ml, photo, stitching, gapi, high
 | GDAL / GeoTIFF (`EMGU_CV_WITH_TIFF`) | `libgeotiff.so.5`, `libgdal.so.X` | Geographic-tagged raster I/O. |
 | Tesseract (`EMGU_CV_WITH_TESSERACT`) | `libtesseract.so.X`, `libleptonica.so.X` | OCR. Emgu builds these from vendored source in "full" mode — turning off skips the build. |
 | FreeType (`EMGU_CV_WITH_FREETYPE`) | (vendored, no runtime dep) | Text rendering inside images. |
+| Unifont (`WITH_UNIFONT`) | (embedded, no runtime dep) | OpenCV 5 downloads and embeds a ~4 MB CJK font for `putText`. AgentDVR draws its own text. |
 
 With everything stripped, the resulting `libcvextern.so` only links against libc, libstdc++, libgcc_s, libm, libdl, libpthread, libdc1394, and libusb-1.0 — all guaranteed present on any glibc-floor-compliant distro. Verify with:
 
@@ -260,7 +282,7 @@ OpenCV's defaults bundle a lot of heavyweight features. For surveillance video w
 | -------- | ---------------- | -------------- |
 | `WITH_IPP` | Intel Performance Primitives statically bundled (~5-10 MB) | Only kicks in on Intel CPUs; modest perf benefit on imgproc; not worth the size cost. |
 | `WITH_OPENCL` | T-API for GPU dispatch via OpenCL (~2-4 MB) | UMat falls back to Mat. AgentDVR handles GPU dispatch via ONNX, not OpenCV. |
-| `WITH_LAPACK` | Linear algebra acceleration (~1-3 MB) | Mostly used by calib3d's solvers; AgentDVR doesn't run camera calibration. |
+| `WITH_LAPACK` | Linear algebra acceleration (~1-3 MB) | Mostly used by calib / geometry solvers (OpenCV falls back to its own); AgentDVR doesn't run camera calibration. |
 | `WITH_TBB` | Intel Threading Building Blocks (~2-3 MB) | OpenCV uses pthread instead. Slightly less efficient parallelism but no measurable AgentDVR impact. |
 | `WITH_QUIRC` | QR code decoder inside objdetect | AgentDVR doesn't scan QR codes. |
 | `WITH_ITT` / `BUILD_ITT` | Intel profiling hooks (~1 MB) | Useless without Intel VTune. |
@@ -290,6 +312,10 @@ Result:
 - Symbols remain in `libcvextern.so`, so calls don't fail with EntryPointNotFoundException either — they just no-op.
 - `CudaInvoke.HasCuda` still works correctly (backed by `core/core_cuda_c.cpp`, which doesn't go through any throw stub — `cv::cuda::getCudaEnabledDeviceCount` returns 0 in non-CUDA builds). It returns `false`, so well-behaved code paths skip cuda calls entirely.
 
+The Linux and macOS builds apply the same no-op to **OpenCV's own** `throw_no_cuda()`, which OpenCV core's `cv::cuda::setDevice` / `getDevice` call directly. OpenCV 5 moved it from `core/private.cuda.hpp` to `core/private/cuda_stubs.hpp`. `sed -i` exits 0 when nothing matches, so a moved file silently disables the fix — the scripts now grep the result and fail the build if the patch didn't apply.
+
+`patches/core_cuda_c.cpp.stub` replaces Emgu's `core_cuda_c.cpp` on every platform, and its signatures must match Emgu's `core_cuda_c.h` exactly. When bumping Emgu, diff that header against the stub first (5.0 switched `CvSize` / `CvScalar` / `CvRect` to `cv::Size` / `cv::Scalar` / `cv::Rect` and dropped five `gpuMat*` functions).
+
 **Known limitation — undefined behavior for non-void cuda functions.** ~55 of the cuda wrapper functions return non-void (int, double, bool, pointers). With the throw silenced, they fall off without a return statement — returning whatever was last in the return register. For value types this is a garbage int/float (probably harmless). For pointer types it's a garbage address that will crash on use.
 
 For AgentDVR's case this only matters if something is calling a cuda function *without* checking `HasCuda` first. The proper long-term fix is to find that unguarded call site in AgentDVR's code and add the `if (CudaInvoke.HasCuda) { ... }` guard. Use a stack trace from the runtime failure to locate it.
@@ -302,6 +328,12 @@ If you ever need a feature back (rebuilt AgentDVR uses YOLO via cv::dnn, say, or
 
 **"`dotnet` not found" during cmake configure.**  
 Emgu's `FindCSharp` errors out without dotnet SDK 8 even for a native-only build. The Dockerfile installs `dotnet-sdk-8.0` from the Microsoft apt feed — if you customize and skip that step, the build will fail at the configure stage.
+
+**"Filename too long" checking out `opencv_contrib` on Windows.**  
+OpenCV 5's contrib `gapi` samples exceed `MAX_PATH`. `build-windows.ps1` clones with `core.longpaths=true`; for a manual clone run `git config --global core.longpaths true` first.
+
+**Link errors mentioning `std::filesystem` on the Buster images.**  
+GCC 8 (Debian 10, OpenCV 5's stated compiler floor) needs `-lstdc++fs` for `std::filesystem`. Add it to the link flags if a module starts using it.
 
 **Build hangs at "Cloning into 'opencv'..."**  
 The OpenCV submodule fork is ~1.5 GB shallow. Slow or flaky networks can stall it. Re-run; `git submodule update --init` resumes.
@@ -347,15 +379,15 @@ The macOS builds run in GitHub Actions on the hosted `macos-14` runner (Apple Si
 | Event | When it fires |
 | ----- | ------------- |
 | `workflow_dispatch` | Manual run from the **Actions** tab — you choose the Emgu tag, arch, and patch level |
-| `push` on `opencv-v*` tags | Automatically builds on any tag like `opencv-v4.12.0` or `opencv-v4.12.0.5764` |
+| `push` on `opencv-v*` tags | Automatically builds on any tag like `opencv-v5.0.0` or `opencv-v5.0.0.6584` |
 
-The tag step strips the NuGet build revision so `opencv-v4.12.0.5764` correctly checks out the git tag `4.12.0`.
+The tag step strips the NuGet build revision so `opencv-v5.0.0.6584` correctly checks out the git tag `5.0.0`.
 
 #### Manual run (Actions tab)
 
 1. Go to **Actions → Build macOS libcvextern → Run workflow**.
 2. Fill in the inputs:
-   - **Emgu CV git tag** — e.g. `4.12.0`
+   - **Emgu CV git tag** — e.g. `5.0.0`
    - **Architecture** — `both` (default), `x64`, or `arm64`
    - **Apply AgentDVR-minimal patches** — `true` (default) or `false`
 3. Click **Run workflow**. Typical run time is 60–90 min.
@@ -365,8 +397,8 @@ The tag step strips the NuGet build revision so `opencv-v4.12.0.5764` correctly 
 Push a tag from the format `opencv-v<X.Y.Z>` to trigger automatically:
 
 ```bash
-git tag opencv-v4.12.0
-git push origin opencv-v4.12.0
+git tag opencv-v5.0.0
+git push origin opencv-v5.0.0
 ```
 
 The workflow builds both archs with the default settings (portable patches on) and attaches the two zip files to a GitHub Release for that tag via `softprops/action-gh-release`.
