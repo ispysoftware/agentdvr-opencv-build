@@ -57,14 +57,17 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Install build tools
+      # cmake, git and clang come preinstalled on GitHub's macOS images, so nothing is
+      # installed here. No `brew update` / `brew install`: when Homebrew has no prebuilt
+      # package for the runner's macOS version it compiles from source - the opencv-v5.0.0.1
+      # run spent 50+ min building Python and LLVM (pulled in by ccache) before reaching
+      # OpenCV. ccache is optional; build-macos.sh warns and builds without it.
+      - name: Check build tools
         run: |
-          brew update --quiet
-          brew install --quiet cmake git ccache || true
           cmake --version
           git --version
           clang --version
-          ccache --version | head -1
+          if command -v ccache >/dev/null 2>&1; then ccache --version | head -1; else echo "ccache not installed - building without it"; fi
 
       - name: Install .NET 8 SDK
         uses: actions/setup-dotnet@v4
