@@ -410,8 +410,11 @@ build_arch() {
     ok "Load commands OK — only portable system deps."
 
     # Mat(filename) in Camera.GetAlertFrame needs cveImread (Emgu imgcodecs wrapper).
-    # Mach-O prefixes C symbols with an underscore.
-    if ! nm -gU "$dylib" | grep -qw '_cveImread'; then
+    # Mach-O prefixes C symbols with an underscore. Symbols go to a file first: grep -q on a
+    # pipe exits at the first match, nm dies of SIGPIPE, and pipefail reports a failure.
+    local defsyms="$build_dir/defsyms.txt"
+    nm -gU "$dylib" > "$defsyms"
+    if ! grep -qw '_cveImread' "$defsyms"; then
         fail "libcvextern.dylib does not export cveImread (imgcodecs wrapper missing)."
     fi
     ok "cveImread exported."

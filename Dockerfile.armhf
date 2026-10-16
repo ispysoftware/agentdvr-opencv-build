@@ -194,23 +194,25 @@ RUN echo "=== SIZE BEFORE STRIP ===" && ls -lh libcvextern.so && \
 RUN set -e ; \
     file libcvextern.so ; \
     ls -lh libcvextern.so ; \
-    echo "=== GLIBC SYMBOLS REQUIRED (max should be <= 2.28) ===" ; \
-    # Informational only — see Dockerfile.x64 for rationale. \
-    set +o pipefail ; set +e ; \
-    nm --dynamic --undefined-only libcvextern.so 2>/dev/null \
-      | grep -oE 'GLIBC_[0-9.]+' | sort -V | uniq > /tmp/glibc_syms.txt || true ; \
-    set -e ; set -o pipefail ; \
-    MAX_GLIBC="$(tail -1 /tmp/glibc_syms.txt 2>/dev/null || echo '(none)')" ; \
-    echo "Max GLIBC symbol: ${MAX_GLIBC}" ; \
-    echo "All GLIBC versions referenced:" ; \
-    cat /tmp/glibc_syms.txt 2>/dev/null | sed 's/^/  /' || echo "  (none)" ; \
+    echo "=== GLIBC SYMBOLS REQUIRED (max must be <= 2.28) ===" ; \
+    # objdump -T, written to a file first — see Dockerfile.x64 (Buster's nm prints no \
+    # versions; grep -q on a pipe + pipefail = false failure). \
+    objdump -T libcvextern.so > /tmp/dynsyms.txt ; \
+    grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' /tmp/dynsyms.txt | sed 's/^GLIBC_//' | sort -uV > /tmp/glibc_vers.txt || true ; \
+    MAX_GLIBC="$(tail -1 /tmp/glibc_vers.txt)" ; \
+    echo "Max GLIBC symbol version: ${MAX_GLIBC:-(none)}" ; \
+    echo "All GLIBC versions referenced: $(tr '\n' ' ' < /tmp/glibc_vers.txt)" ; \
+    if [ -z "${MAX_GLIBC}" ] || [ "$(printf '%s\n' 2.28 "${MAX_GLIBC}" | sort -V | tail -1)" != "2.28" ]; then \
+      echo "!!! ERROR: glibc floor check failed (max ${MAX_GLIBC:-none}, must be <= 2.28)" ; exit 1 ; \
+    fi ; \
     echo "=== NEEDED ENTRIES (must be whitelist-only) ===" ; \
     readelf -d libcvextern.so | grep NEEDED ; \
     \
     # Whitelist of allowed dynamic dependencies — see Dockerfile.x64 for full rationale. \
     # armhf adds libatomic.so.1 (GCC may emit __atomic_* calls on 32-bit ARM for 64-bit \
     # atomic ops that lack native instructions) — it's part of libgcc and universally present. \
-    ALLOWED='^(libc\.so\.6|libdl\.so\.2|libm\.so\.6|libpthread\.so\.0|librt\.so\.1|libgcc_s\.so\.1|libstdc\+\+\.so\.6|libz\.so\.1|libatomic\.so\.1)$' ; \
+    # ld-linux-armhf.so.3 is the armhf dynamic loader (see the x64 note on ld-linux). \
+    ALLOWED='^(libc\.so\.6|libdl\.so\.2|libm\.so\.6|libpthread\.so\.0|librt\.so\.1|libgcc_s\.so\.1|libstdc\+\+\.so\.6|libz\.so\.1|libatomic\.so\.1|ld-linux-armhf\.so\.3)$' ; \
     UNEXPECTED="$(readelf -d libcvextern.so | awk '/NEEDED/ {gsub(/[\[\]]/,"",$NF); print $NF}' | grep -Ev "${ALLOWED}" || true)" ; \
     if [ -n "${UNEXPECTED}" ]; then \
       echo "" ; \
@@ -232,9 +234,10 @@ RUN set -e ; \
       echo "(no missing libs)" ; \
     fi ; \
     echo "=== EXPORTED SYMBOL COUNT ===" ; \
-    nm --dynamic --defined-only libcvextern.so | wc -l ; \
-    # Mat(filename) needs cveImread — see Dockerfile.x64. \
-    if ! nm --dynamic --defined-only libcvextern.so | grep -qw cveImread ; then \
+    nm --dynamic --defined-only libcvextern.so > /tmp/defsyms.txt ; \
+    wc -l < /tmp/defsyms.txt ; \
+    # Mat(filename) needs cveImread — see Dockerfile.x64. grep reads the file, not a pipe. \
+    if ! grep -qw cveImread /tmp/defsyms.txt ; then \
       echo "!!! ERROR: libcvextern.so does not export cveImread (imgcodecs wrapper missing)" ; exit 1 ; \
     fi ; \
     echo "(cveImread exported)"
