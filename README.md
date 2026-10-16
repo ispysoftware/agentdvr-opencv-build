@@ -287,7 +287,7 @@ OpenCV's defaults bundle a lot of heavyweight features. For surveillance video w
 
 | Disabled | Default behavior | Why we skip it |
 | -------- | ---------------- | -------------- |
-| `WITH_IPP` | Intel Performance Primitives statically bundled (~5-10 MB) | Only kicks in on Intel CPUs; modest perf benefit on imgproc; not worth the size cost. |
+| `WITH_IPP` | Intel Performance Primitives (IPPICV) statically bundled | **Measured and rejected 2026-10-16 — don't retry.** win-x64 cvextern went 16.3 → 43.7 MB (+27 MB, zip 7.2 → 17.2 MB). Benchmarked on AgentDVR's hot calls: Resize (Linear/Area, Y and BGR), every I420 CvtColor, warps, blur were unchanged — OpenCV 5's own SIMD already matches IPP; 4K→1080p resize got 28% slower, CountNonZero 0.6×. The only real wins were Rotate/Flip (7-14×), and those were fixed in AgentDVR itself with SIMD (agent-service 35b8a37f). Licence is Intel Simplified Software License (redistributable, not OSI). |
 | `WITH_OPENCL` | T-API for GPU dispatch via OpenCL (~2-4 MB) | UMat falls back to Mat. AgentDVR handles GPU dispatch via ONNX, not OpenCV. |
 | `WITH_LAPACK` | Linear algebra acceleration (~1-3 MB) | Mostly used by calib / geometry solvers (OpenCV falls back to its own); AgentDVR doesn't run camera calibration. |
 | `WITH_TBB` | Intel Threading Building Blocks (~2-3 MB) | OpenCV uses pthread instead. Slightly less efficient parallelism but no measurable AgentDVR impact. |

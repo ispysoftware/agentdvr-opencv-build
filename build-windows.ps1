@@ -344,6 +344,7 @@ if ($Portable) {
         'set(WITH_HDF5 OFF CACHE BOOL "")',
         'set(WITH_VTK OFF CACHE BOOL "")',
         'set(WITH_GDAL OFF CACHE BOOL "")',
+        '# IPP stays off: measured +27 MB for no gain on AgentDVR''s hot calls (README, WITH_IPP row).',
         'set(WITH_IPP OFF CACHE BOOL "")',
         'set(WITH_OPENCL OFF CACHE BOOL "")',
         'set(WITH_LAPACK OFF CACHE BOOL "")',
