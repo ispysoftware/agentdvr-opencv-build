@@ -8,7 +8,7 @@
 #   .\build.ps1                       # prints usage
 #   .\build.ps1 -Arch x64             # x64 only
 #   .\build.ps1 -Arch arm64           # arm64 only (slow via QEMU)
-#   .\build.ps1 -Arch armhf           # 32-bit ARM / armv7 (slow via QEMU)
+#   .\build.ps1 -Arch armhf           # 32-bit ARM / armv7 (cross-compiled on x64, no QEMU)
 #   .\build.ps1 -Arch all             # x64 + arm64 + armhf
 #   .\build.ps1 -EmguTag 5.0.0       # override the emgucv git tag
 #   .\build.ps1 -BuildType core       # override Emgu's build profile (full|core|mini)
@@ -40,7 +40,7 @@ if (-not $Arch) {
     Write-Host "Targets (-Arch):"
     Write-Host "  x64     linux-x64   (Debian Buster, glibc 2.28)  ~20-35 min"
     Write-Host "  arm64   linux-arm64 (Debian Buster, glibc 2.28)  ~2-6 h via QEMU"
-    Write-Host "  armhf   linux-arm   (Debian Buster, glibc 2.28)  ~3-8 h via QEMU"
+    Write-Host "  armhf   linux-arm   (Debian Buster, glibc 2.28)  ~20-35 min (cross-compiled, no QEMU)"
     Write-Host "  both    x64 + arm64"
     Write-Host "  all     x64 + arm64 + armhf"
     Write-Host ""
@@ -166,29 +166,15 @@ try {
 
     # ---- Build armhf ----
     if ($Arch -in @('armhf','all')) {
-        Write-Section "Building linux-arm (armv7/armhf, Debian Buster base, glibc 2.28 target)"
-        Write-Host "NOTE: armhf via QEMU emulation typically takes 3-8 hours." -ForegroundColor Yellow
-
-        Write-Host "Installing QEMU binfmt handlers for arm (no-op if already present)..."
-        docker run --privileged --rm tonistiigi/binfmt --install arm | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warning "binfmt install returned non-zero. If you're already on arm hardware this is fine."
-        }
-
-        $builderName = 'emgucv-builder'
-        $existing = docker buildx ls | Select-String -Pattern $builderName -Quiet
-        if (-not $existing) {
-            docker buildx create --name $builderName --use | Out-Null
-        } else {
-            docker buildx use $builderName | Out-Null
-        }
-        docker buildx inspect --bootstrap | Out-Null
+        Write-Section "Building linux-arm (armv7/armhf, cross-compiled on Debian Buster x64, glibc 2.28 target)"
+        # Dockerfile.armhf is an x64 container running Debian's armhf cross toolchain, so it
+        # builds at native speed with no QEMU/binfmt setup.
 
         $armhfOut = Join-Path $absOut 'linux-arm'
         New-Item -ItemType Directory -Force -Path $armhfOut | Out-Null
 
         docker buildx build `
-            --platform linux/arm/v7 `
+            --platform linux/amd64 `
             -f Dockerfile.armhf `
             @buildArgs `
             --output "type=local,dest=$armhfOut" `

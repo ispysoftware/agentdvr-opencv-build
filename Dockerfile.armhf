@@ -3,22 +3,26 @@
 # Builds Emgu CV's libcvextern.so for linux-arm (armv7/armhf) on Debian 10 (Buster, glibc 2.28).
 # Output binary loads on Debian 10+ armhf, Raspberry Pi OS Buster+ (32-bit), Ubuntu 18.10+ armhf, etc.
 #
-# Usage (on an x64/arm64 dev box, requires QEMU + buildx):
-#   docker run --privileged --rm tonistiigi/binfmt --install arm
-#   docker buildx create --use --name emgucv-armhf 2>/dev/null || true
-#   docker buildx build --platform linux/arm/v7 -f Dockerfile.armhf \
+# CROSS-COMPILED on an x64 Buster image with Debian's own armhf cross toolchain
+# (crossbuild-essential-armhf, GCC 8 - the same compiler version as the native Buster armhf gcc,
+# linking against Buster's armhf glibc 2.28, so the floor is unchanged). This replaced building
+# inside an emulated linux/arm/v7 container: GitHub's arm64 runners can't execute 32-bit ARM
+# natively, so that ran under QEMU (~5x slower) and took ~145 min against ~10 for arm64.
+#
+# Debian's armhf gcc defaults to -march=armv7-a -mfpu=vfpv3-d16 -mthumb -mfloat-abi=hard, and
+# OpenCV's CPU_BASELINE stays DETECT, so - like the old native build - no NEON is assumed and the
+# library runs on every armv7 hard-float CPU.
+#
+# Usage (any x64 box with Docker; no QEMU needed):
+#   docker buildx build --platform linux/amd64 -f Dockerfile.armhf \
 #       --output type=local,dest=./out/linux-arm .
 #
-# Usage (on a real armhf host — much faster):
-#   docker build -f Dockerfile.armhf --output type=local,dest=./out/linux-arm .
-#
 # Output: ./out/linux-arm/libcvextern.so
-# Build time via QEMU emulation: 3-8 hours. Native armhf host: ~90-120 min.
 #
-# .NET RID for 32-bit ARM is "linux-arm". Emgu outputs the .so to:
-#   libs/runtimes/linux-arm/native/libcvextern.so  (when IS_DEBIAN=TRUE)
+# .NET RID for 32-bit ARM is "linux-arm". Emgu detects the target from the compiler's __arm__
+# define (CheckTargetArch.cmake) and outputs the .so to libs/runtimes/linux-arm/native/.
 
-FROM --platform=linux/arm/v7 debian:buster AS builder
+FROM --platform=linux/amd64 debian:buster AS builder
 
 ARG EMGU_TAG=5.0.0
 ARG BUILD_TYPE=full
@@ -45,57 +49,33 @@ RUN printf 'deb http://archive.debian.org/debian buster main\ndeb http://archive
 COPY patches/ /patches/
 
 # ---- Build dependencies ---------------------------------------------------
-# Same package set as Dockerfile.arm64 (both Debian 10 Buster).
-# lsb-release is required — see Dockerfile.arm64 for the detailed explanation.
-# Mono omitted for the same reasons as arm64 (QEMU segfault in post-install).
+# Host (x64) tools only: every optional OpenCV feature is switched off, so no armhf -dev
+# libraries are needed. crossbuild-essential-armhf brings arm-linux-gnueabihf-gcc/g++ (GCC 8),
+# the armhf libc/libstdc++ to link against (/usr/arm-linux-gnueabihf) and the armhf binutils
+# used by the verify step. build-essential is the host compiler for Emgu's Eigen install step.
+# lsb-release lets Emgu's CheckPlatform.cmake detect Debian (IS_DEBIAN) - see Dockerfile.arm64.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl wget gnupg git lsb-release \
-      build-essential cmake pkg-config file binutils python3 \
-      libtiff-dev libgeotiff-dev libgtk-3-dev libgstreamer1.0-dev \
-      libavcodec-dev libswscale-dev libavformat-dev libopenexr-dev \
-      libdc1394-22-dev libv4l-dev libeigen3-dev libgl1-mesa-dev cmake-curses-gui \
-      freeglut3-dev libvtk6-dev qtbase5-dev libusb-1.0-0-dev ccache \
-      libharfbuzz-dev libfreetype6-dev libgflags-dev libgoogle-glog-dev liblapacke-dev \
+      ca-certificates wget git lsb-release file python3 \
+      build-essential crossbuild-essential-armhf \
  && rm -rf /var/lib/apt/lists/*
 
-# ccache: prepend /usr/lib/ccache to PATH so cmake auto-uses ccache-wrapped gcc/g++.
-# See Dockerfile.x64 for full rationale. Especially valuable for armhf under QEMU
-# where rebuilds otherwise take 3-8 hours.
-ENV PATH="/usr/lib/ccache:${PATH}" \
-    CCACHE_COMPILERCHECK=content \
-    CCACHE_MAXSIZE=10G \
-    CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime
-
-# dotnet-sdk-8.0 — download tarball directly from the stable Azure CDN with a pinned version.
-# dotnet-install.sh's "latest channel" resolution hits builds.dotnet.microsoft.com which is
-# unreachable from inside the QEMU armhf container. Pinning a specific version bypasses that
-# lookup entirely and goes straight to the versioned download URL.
-# RID for armhf (armv7 hard-float) in .NET terminology is linux-arm.
-ARG DOTNET_VER=8.0.407
-RUN mkdir -p /usr/share/dotnet \
- && wget -q "https://dotnetcli.azureedge.net/dotnet/Sdk/${DOTNET_VER}/dotnet-sdk-${DOTNET_VER}-linux-arm.tar.gz" \
- && tar xzf dotnet-sdk-${DOTNET_VER}-linux-arm.tar.gz -C /usr/share/dotnet \
- && rm dotnet-sdk-${DOTNET_VER}-linux-arm.tar.gz \
+# dotnet-sdk-8.0 is REQUIRED by Emgu's CMake (FindCSharp) even for a native-only build. The
+# host's x64 SDK is fine - nothing managed is built (only the cvextern target).
+RUN wget -q https://dot.net/v1/dotnet-install.sh -O /tmp/dotnet-install.sh \
+ && chmod +x /tmp/dotnet-install.sh \
+ && /tmp/dotnet-install.sh --channel 8.0 --install-dir /usr/share/dotnet \
  && ln -sf /usr/share/dotnet/dotnet /usr/bin/dotnet \
+ && rm /tmp/dotnet-install.sh \
  && dotnet --version
 
-# Buster ships cmake 3.13 but EmguCV 5.0 requires cmake >= 3.16.
-# cmake.org provides no armhf binary, so build from source via the bootstrap script.
-# bootstrap is architecture-agnostic (only needs an existing C/C++ toolchain + make).
-# Build time: ~20-40 min native; under QEMU adds roughly 1-2 h to the overall job.
-# cmake 3.28 was chosen: same as the arm64/x64 builds, glibc 2.17 floor doesn't apply
-# here because we're building it ourselves inside the Buster container.
-# -DCMAKE_USE_OPENSSL=OFF: avoids needing libssl-dev headers; cmake's built-in file()
-# download (used for FetchContent) still works via wget/curl as a fallback.
+# Buster ships cmake 3.13 but EmguCV 5.0 requires cmake >= 3.16 - same prebuilt x86_64 binary
+# as Dockerfile.x64 (no more building cmake from source under emulation).
 RUN CMAKE_VER=3.28.0 \
- && wget -q "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/cmake-${CMAKE_VER}.tar.gz" \
- && tar xf cmake-${CMAKE_VER}.tar.gz \
- && cd cmake-${CMAKE_VER} \
- && ./bootstrap --parallel=$(nproc) -- -DCMAKE_USE_OPENSSL=OFF \
- && make -j$(nproc) \
- && make install \
- && cd / && rm -rf cmake-${CMAKE_VER} cmake-${CMAKE_VER}.tar.gz \
- && cmake --version
+ && wget -q "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/cmake-${CMAKE_VER}-linux-x86_64.tar.gz" \
+ && tar xf cmake-${CMAKE_VER}-linux-x86_64.tar.gz -C /usr/local --strip-components=1 \
+ && rm cmake-${CMAKE_VER}-linux-x86_64.tar.gz \
+ && cmake --version \
+ && arm-linux-gnueabihf-g++ --version | head -1
 
 # ---- Source ---------------------------------------------------------------
 WORKDIR /work
@@ -119,16 +99,24 @@ WORKDIR /work/emgucv/platforms/debian/bookworm
 
 # AgentDVR-minimal build: same module strip + portability disables as arm64.
 # See Dockerfile.x64 for the rationale behind each flag and each BUILD_LIST module.
-# Note: no CPU_BASELINE/CPU_DISPATCH override for armhf — let OpenCV autodetect NEON.
-# Emgu 5's cmake_configure adds PNG_ARM_NEON=off and WITH_MLAS=FALSE on 32-bit by itself.
+# Note: no CPU_BASELINE/CPU_DISPATCH override for armhf — OpenCV keeps DETECT (see header).
+#
+# Cross-compile flags (main OpenCV/Emgu configure only - Emgu's Eigen install step keeps the
+# host compiler, it only installs headers):
+#   CMAKE_TOOLCHAIN_FILE  OpenCV's own arm-gnueabi toolchain; with SOFTFP unset it picks
+#                         arm-linux-gnueabihf-gcc/g++ and the /usr/arm-linux-gnueabihf sysroot.
+#   BUILD_ZLIB            bundled zlib, statically linked: the cross sysroot has no zlib, and it
+#                         drops the libz.so.1 runtime dependency the native build had.
+# cmake_configure's own 32-bit tweaks (PNG_ARM_NEON off, WITH_MLAS off) key off the BUILD host's
+# `getconf LONG_BIT` and so don't fire here - neither matters: PNG is off and MLAS is dnn-only.
 RUN if [ "${PORTABLE}" = "1" ]; then \
-      sed -i 's|-DBUILD_TESTS:BOOL=FALSE|-DBUILD_TESTS:BOOL=FALSE -DBUILD_LIST=core,imgproc,geometry,flann,features,calib,stereo,objdetect,video,imgcodecs,xobjdetect,tracking,plot,bgsegm -DWITH_FFMPEG:BOOL=OFF -DWITH_GSTREAMER:BOOL=OFF -DWITH_V4L:BOOL=OFF -DWITH_LIBV4L:BOOL=OFF -DWITH_HDF5:BOOL=OFF -DWITH_VTK:BOOL=OFF -DWITH_GDAL:BOOL=OFF -DWITH_TIFF:BOOL=OFF -DWITH_JPEG:BOOL=ON -DWITH_PNG:BOOL=OFF -DWITH_WEBP:BOOL=OFF -DWITH_OPENEXR:BOOL=OFF -DWITH_JASPER:BOOL=OFF -DWITH_OPENJPEG:BOOL=OFF -DWITH_AVIF:BOOL=OFF -DWITH_JPEGXL:BOOL=OFF -DWITH_UNIFONT:BOOL=OFF -DWITH_VA:BOOL=OFF -DWITH_VA_INTEL:BOOL=OFF -DWITH_1394:BOOL=OFF -DWITH_FREETYPE:BOOL=OFF -DWITH_GTK:BOOL=OFF -DWITH_GTK_2_X:BOOL=OFF -DWITH_QT:BOOL=OFF -DWITH_OPENGL:BOOL=OFF -DWITH_PROTOBUF:BOOL=OFF -DWITH_ADE:BOOL=OFF -DWITH_OBSENSOR:BOOL=OFF -DBUILD_opencv_hdf:BOOL=OFF -DEMGU_CV_WITH_TIFF:BOOL=FALSE -DWITH_IPP:BOOL=OFF -DWITH_OPENCL:BOOL=OFF -DWITH_LAPACK:BOOL=OFF -DWITH_TBB:BOOL=OFF -DWITH_QUIRC:BOOL=OFF -DWITH_ITT:BOOL=OFF -DBUILD_IPP_IW:BOOL=OFF -DBUILD_ITT:BOOL=OFF|' cmake_configure ; \
+      sed -i 's|-DBUILD_TESTS:BOOL=FALSE|-DBUILD_TESTS:BOOL=FALSE -DCMAKE_TOOLCHAIN_FILE=/work/emgucv/opencv/platforms/linux/arm-gnueabi.toolchain.cmake -DBUILD_ZLIB:BOOL=ON -DBUILD_LIST=core,imgproc,geometry,flann,features,calib,stereo,objdetect,video,imgcodecs,xobjdetect,tracking,plot,bgsegm -DWITH_FFMPEG:BOOL=OFF -DWITH_GSTREAMER:BOOL=OFF -DWITH_V4L:BOOL=OFF -DWITH_LIBV4L:BOOL=OFF -DWITH_HDF5:BOOL=OFF -DWITH_VTK:BOOL=OFF -DWITH_GDAL:BOOL=OFF -DWITH_TIFF:BOOL=OFF -DWITH_JPEG:BOOL=ON -DWITH_PNG:BOOL=OFF -DWITH_WEBP:BOOL=OFF -DWITH_OPENEXR:BOOL=OFF -DWITH_JASPER:BOOL=OFF -DWITH_OPENJPEG:BOOL=OFF -DWITH_AVIF:BOOL=OFF -DWITH_JPEGXL:BOOL=OFF -DWITH_UNIFONT:BOOL=OFF -DWITH_VA:BOOL=OFF -DWITH_VA_INTEL:BOOL=OFF -DWITH_1394:BOOL=OFF -DWITH_FREETYPE:BOOL=OFF -DWITH_GTK:BOOL=OFF -DWITH_GTK_2_X:BOOL=OFF -DWITH_QT:BOOL=OFF -DWITH_OPENGL:BOOL=OFF -DWITH_PROTOBUF:BOOL=OFF -DWITH_ADE:BOOL=OFF -DWITH_OBSENSOR:BOOL=OFF -DBUILD_opencv_hdf:BOOL=OFF -DEMGU_CV_WITH_TIFF:BOOL=FALSE -DWITH_IPP:BOOL=OFF -DWITH_OPENCL:BOOL=OFF -DWITH_LAPACK:BOOL=OFF -DWITH_TBB:BOOL=OFF -DWITH_QUIRC:BOOL=OFF -DWITH_ITT:BOOL=OFF -DBUILD_IPP_IW:BOOL=OFF -DBUILD_ITT:BOOL=OFF|' cmake_configure ; \
       # BUILD_JPEG stays TRUE (bundled libjpeg-turbo, static) — see Dockerfile.x64. \
       sed -i 's|-DBUILD_PNG:BOOL=TRUE|-DBUILD_PNG:BOOL=FALSE|g; s|-DBUILD_TIFF:BOOL=TRUE|-DBUILD_TIFF:BOOL=FALSE|g; s|-DBUILD_WEBP:BOOL=TRUE|-DBUILD_WEBP:BOOL=FALSE|g; s|-DBUILD_JASPER:BOOL=TRUE|-DBUILD_JASPER:BOOL=FALSE|g; s|-DBUILD_OPENEXR:BOOL=TRUE|-DBUILD_OPENEXR:BOOL=FALSE|g' cmake_configure ; \
       grep -q -- '-DBUILD_JPEG:BOOL=TRUE' cmake_configure || { echo "ERROR: cmake_configure no longer sets -DBUILD_JPEG:BOOL=TRUE; add it to the injected flags." ; exit 1 ; } ; \
       sed -i 's|-DWITH_VTK:BOOL=TRUE|-DWITH_VTK:BOOL=FALSE|g; s|-DWITH_GSTREAMER:BOOL=TRUE|-DWITH_GSTREAMER:BOOL=FALSE|g' cmake_configure ; \
       sed -i 's|EMGU_CV_WITH_TESSERACT:BOOL=TRUE|EMGU_CV_WITH_TESSERACT:BOOL=FALSE|g; s|EMGU_CV_WITH_FREETYPE:BOOL=TRUE|EMGU_CV_WITH_FREETYPE:BOOL=FALSE|g' cmake_configure ; \
-      echo "AgentDVR-minimal build: BUILD_LIST applied; FFmpeg/GStreamer/V4L/HDF5/VTK/GDAL/GeoTIFF/Tesseract/FreeType disabled." ; \
+      echo "AgentDVR-minimal build: BUILD_LIST applied; FFmpeg/GStreamer/V4L/HDF5/VTK/GDAL/GeoTIFF/Tesseract/FreeType disabled; cross toolchain injected." ; \
       \
       # Feature2D forward-decl fix — same as arm64/x64. \
       sed -i 's|class Feature2D {};|class Feature2D;|g' /work/emgucv/Emgu.CV.Extern/stitching/stitching_c.h ; \
@@ -152,16 +140,27 @@ RUN if [ "${PORTABLE}" = "1" ]; then \
         echo "ERROR: throw_no_cuda() patch did not apply to $CUDA_STUBS" ; exit 1 ; \
       fi ; \
       echo "Patched Feature2D forward decls; neutralized Emgu + OpenCV-internal cuda throw stubs." ; \
+    else \
+      echo "ERROR: Dockerfile.armhf cross-compiles and only supports PORTABLE=1 (the toolchain is injected with the portable flags)." ; exit 1 ; \
     fi
 
-# The bookworm configure ends with `cmake --build . --parallel 1 --target package`.
-# Replace --parallel 1 with --parallel $(nproc) and run.
-# No persistent BuildKit cache mount — see Dockerfile.x64.
+# Build only what AgentDVR ships - see Dockerfile.x64 for the shared rationale: skip Emgu's HDF5
+# build and build the cvextern target instead of `package`. For the cross build this is required,
+# not just faster: HDF5's configure runs test programs (try_run) that can't execute here, and the
+# `package` target would build Emgu's C# projects/examples.
+RUN sed -i '/^ *cd hdf5$/,/^ *cd \.\.\/\.\.$/d' cmake_configure \
+ && sed -i 's|--target package|--target cvextern|' cmake_configure \
+ && if grep -q 'cd hdf5' cmake_configure || ! grep -q -- '--target cvextern' cmake_configure ; then \
+      echo "ERROR: cmake_configure layout changed - HDF5 skip / cvextern target sed did not apply" ; exit 1 ; \
+    fi
+
+# Replace --parallel 1 with --parallel $(nproc) and run. bash -e: with only the cvextern target
+# left, the script should succeed end to end, so stop at the first failing command.
 RUN if [ -n "${JOBS}" ]; then PARALLEL="${JOBS}"; else PARALLEL="$(nproc)"; fi; \
     sed -i "s|--parallel 1|--parallel ${PARALLEL}|g" cmake_configure; \
     export MAKEFLAGS="-j${PARALLEL}"; \
     echo "Building with PARALLEL=${PARALLEL}"; \
-    bash ./cmake_configure ${BUILD_TYPE} 2>&1 | tee /tmp/emgu_build.log ; \
+    bash -e ./cmake_configure ${BUILD_TYPE} 2>&1 | tee /tmp/emgu_build.log ; \
     BUILD_RC=$? ; \
     if [ "$BUILD_RC" != "0" ]; then \
       echo "" >&2 ; \
@@ -188,16 +187,28 @@ RUN set -e ; \
       cp -p "$FOUND" "$EXPECTED/libcvextern.so" ; \
     fi
 WORKDIR /work/emgucv/libs/runtimes/linux-arm/native
+# The host's strip/objdump/nm are x86-only builds of binutils - use the armhf cross versions.
+# (readelf and file are format-independent.)
 RUN echo "=== SIZE BEFORE STRIP ===" && ls -lh libcvextern.so && \
-    strip --strip-all libcvextern.so && \
+    arm-linux-gnueabihf-strip --strip-all libcvextern.so && \
     echo "=== SIZE AFTER STRIP ===" && ls -lh libcvextern.so
 RUN set -e ; \
-    file libcvextern.so ; \
+    # file/readelf output goes to files before grep -q (see the SIGPIPE note below). \
+    file libcvextern.so | tee /tmp/file.txt ; \
+    if ! grep -q 'ELF 32-bit LSB.*ARM.*EABI5' /tmp/file.txt ; then \
+      echo "!!! ERROR: libcvextern.so is not a 32-bit ARM EABI5 binary" ; exit 1 ; \
+    fi ; \
+    readelf -A libcvextern.so > /tmp/armattr.txt ; \
+    if ! grep -q 'Tag_ABI_VFP_args: VFP registers' /tmp/armattr.txt ; then \
+      echo "!!! ERROR: libcvextern.so is not hard-float (Tag_ABI_VFP_args)" ; exit 1 ; \
+    fi ; \
+    echo "=== ARM ATTRIBUTES ===" ; \
+    grep -E 'Tag_CPU_arch:|Tag_FP_arch|Tag_Advanced_SIMD_arch|Tag_ABI_VFP_args' /tmp/armattr.txt || true ; \
     ls -lh libcvextern.so ; \
     echo "=== GLIBC SYMBOLS REQUIRED (max must be <= 2.28) ===" ; \
     # objdump -T, written to a file first — see Dockerfile.x64 (Buster's nm prints no \
     # versions; grep -q on a pipe + pipefail = false failure). \
-    objdump -T libcvextern.so > /tmp/dynsyms.txt ; \
+    arm-linux-gnueabihf-objdump -T libcvextern.so > /tmp/dynsyms.txt ; \
     grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' /tmp/dynsyms.txt | sed 's/^GLIBC_//' | sort -uV > /tmp/glibc_vers.txt || true ; \
     MAX_GLIBC="$(tail -1 /tmp/glibc_vers.txt)" ; \
     echo "Max GLIBC symbol version: ${MAX_GLIBC:-(none)}" ; \
@@ -212,6 +223,7 @@ RUN set -e ; \
     # armhf adds libatomic.so.1 (GCC may emit __atomic_* calls on 32-bit ARM for 64-bit \
     # atomic ops that lack native instructions) — it's part of libgcc and universally present. \
     # ld-linux-armhf.so.3 is the armhf dynamic loader (see the x64 note on ld-linux). \
+    # libz.so.1 stays allowed but shouldn't appear now that zlib is bundled (BUILD_ZLIB). \
     ALLOWED='^(libc\.so\.6|libdl\.so\.2|libm\.so\.6|libpthread\.so\.0|librt\.so\.1|libgcc_s\.so\.1|libstdc\+\+\.so\.6|libz\.so\.1|libatomic\.so\.1|ld-linux-armhf\.so\.3)$' ; \
     UNEXPECTED="$(readelf -d libcvextern.so | awk '/NEEDED/ {gsub(/[\[\]]/,"",$NF); print $NF}' | grep -Ev "${ALLOWED}" || true)" ; \
     if [ -n "${UNEXPECTED}" ]; then \
@@ -226,15 +238,10 @@ RUN set -e ; \
       exit 1 ; \
     fi ; \
     echo "(NEEDED whitelist OK — only portable system libs)" ; \
-    \
-    echo "=== LDD (missing dependencies should be empty) ===" ; \
-    if ldd libcvextern.so | grep "not found" ; then \
-      echo "!!! ERROR: unresolved dependencies above" ; exit 1 ; \
-    else \
-      echo "(no missing libs)" ; \
-    fi ; \
+    # No ldd check here: ldd runs the target's dynamic loader, which can't execute on the x64 \
+    # host. The whitelist above is the dependency check for the cross build. \
     echo "=== EXPORTED SYMBOL COUNT ===" ; \
-    nm --dynamic --defined-only libcvextern.so > /tmp/defsyms.txt ; \
+    arm-linux-gnueabihf-nm --dynamic --defined-only libcvextern.so > /tmp/defsyms.txt ; \
     wc -l < /tmp/defsyms.txt ; \
     # Mat(filename) needs cveImread — see Dockerfile.x64. grep reads the file, not a pipe. \
     if ! grep -qw cveImread /tmp/defsyms.txt ; then \

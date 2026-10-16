@@ -161,14 +161,21 @@ RUN if [ "${PORTABLE}" = "1" ]; then \
       echo "Patched Feature2D forward decls; neutralized Emgu + OpenCV-internal cuda throw stubs." ; \
     fi
 
-# The bookworm configure ends with `cmake --build . --parallel 1 --target package`.
-# Replace --parallel 1 with --parallel $(nproc) and run.
-# No persistent BuildKit cache mount — see Dockerfile.x64.
+# Build only what AgentDVR ships: skip Emgu's HDF5 build and build the cvextern target instead
+# of `package` (C# projects/NuGet/examples) — see Dockerfile.x64.
+RUN sed -i '/^ *cd hdf5$/,/^ *cd \.\.\/\.\.$/d' cmake_configure \
+ && sed -i 's|--target package|--target cvextern|' cmake_configure \
+ && if grep -q 'cd hdf5' cmake_configure || ! grep -q -- '--target cvextern' cmake_configure ; then \
+      echo "ERROR: cmake_configure layout changed - HDF5 skip / cvextern target sed did not apply" ; exit 1 ; \
+    fi
+
+# Replace --parallel 1 with --parallel $(nproc) and run; bash -e stops at the first failure
+# (see Dockerfile.x64). No persistent BuildKit cache mount — see Dockerfile.x64.
 RUN if [ -n "${JOBS}" ]; then PARALLEL="${JOBS}"; else PARALLEL="$(nproc)"; fi; \
     sed -i "s|--parallel 1|--parallel ${PARALLEL}|g" cmake_configure; \
     export MAKEFLAGS="-j${PARALLEL}"; \
     echo "Building with PARALLEL=${PARALLEL}"; \
-    bash ./cmake_configure ${BUILD_TYPE} 2>&1 | tee /tmp/emgu_build.log ; \
+    bash -e ./cmake_configure ${BUILD_TYPE} 2>&1 | tee /tmp/emgu_build.log ; \
     BUILD_RC=$? ; \
     if [ "$BUILD_RC" != "0" ]; then \
       echo "" >&2 ; \

@@ -14,7 +14,7 @@ Separately, when AgentDVR runs with ONNX Runtime's CUDA execution provider, **Em
 | ---------------- | ------------------------------ | ------------------------ | ----------------------- |
 | Linux x64        | Docker (Debian 10 Buster)      | glibc 2.28               | `linux-x64/libcvextern.so`   |
 | Linux arm64      | Docker (Debian 10 Buster)      | glibc 2.28               | `linux-arm64/libcvextern.so` |
-| Linux armhf      | Docker (Debian 10 Buster)      | glibc 2.28               | `linux-arm/libcvextern.so`   |
+| Linux armhf      | Docker (Debian 10 Buster x64, cross-compiled) | glibc 2.28 | `linux-arm/libcvextern.so`   |
 | Windows x64      | Native MSVC (VS 2022)          | Windows 10+ / .NET 8     | `win-x64/cvextern.dll`  |
 | macOS x64        | Native Xcode CLT               | macOS 11+ (Big Sur)      | `macos-x64/libcvextern.dylib` |
 | macOS arm64      | Native Xcode CLT               | macOS 11+ (Big Sur)      | `macos-arm64/libcvextern.dylib` |
@@ -25,7 +25,7 @@ Separately, when AgentDVR runs with ONNX Runtime's CUDA execution provider, **Em
 
 - **Docker Desktop** (Windows/macOS) or **Docker Engine** (Linux) with `docker buildx` available (bundled since Docker 20.10).
 - ~30 GB free disk for the build images and emgucv source + submodules.
-- For arm64 emulation on an x64 host: QEMU binfmt handlers — the script installs these automatically via `tonistiigi/binfmt`.
+- For arm64 emulation on an x64 host: QEMU binfmt handlers — the script installs these automatically via `tonistiigi/binfmt`. armhf needs none: it cross-compiles in an x64 container.
 
 ### For the Windows build (native MSVC)
 
@@ -82,7 +82,7 @@ Use `build.ps1` on Windows — it runs in the current window and keeps all outpu
 # Individual targets
 .\build.ps1 -Arch x64
 .\build.ps1 -Arch arm64   # slow via QEMU on x64 host — 2-6 hours. See "ARM via CI" below.
-.\build.ps1 -Arch armhf   # 32-bit ARM / armv7 — slow via QEMU on x64 host (3-8 hours)
+.\build.ps1 -Arch armhf   # 32-bit ARM / armv7 — cross-compiled on x64, no QEMU (~20-35 min)
 .\build.ps1 -Arch all     # x64 + arm64 + armhf
 
 # Override Emgu git tag / build profile / parallelism
@@ -100,18 +100,26 @@ EMGU_TAG=5.0.0 BUILD_TYPE=full JOBS=8 ./build.sh
 
 ### ARM builds via GitHub Actions (fast — no QEMU)
 
-Building arm64/armhf via QEMU on an x64 host is slow (2-8 hours). The repo includes a
-GitHub Actions workflow that runs the builds on GitHub's free ARM hosted runners
-where arm64 is fully native (~45-75 min) and armhf runs via the ARM CPU's aarch32
-user mode (~60-90 min) — no emulation in either case.
+Building arm64 via QEMU on an x64 host is slow (2-6 hours). The `Build Linux ARM libcvextern`
+workflow avoids emulation for both ARM targets (~10-15 min each):
+
+- **arm64** builds natively on GitHub's ARM hosted runner (`ubuntu-22.04-arm`).
+- **armhf** is cross-compiled on a standard x64 runner: `Dockerfile.armhf` is a Debian Buster
+  x64 image using Debian's armhf cross toolchain (`crossbuild-essential-armhf`, GCC 8) against
+  Buster's armhf glibc 2.28, with OpenCV's `platforms/linux/arm-gnueabi.toolchain.cmake`. It
+  used to run as a `linux/arm/v7` container on the ARM runner, but those CPUs can't execute
+  32-bit ARM, so it ran under QEMU (~5x slower; ~145 min). The output is unchanged: ARMv7
+  hard-float, no NEON assumed (OpenCV's `CPU_BASELINE` stays `DETECT`), same glibc floor. Two
+  differences: zlib is bundled and linked statically (`BUILD_ZLIB`), so there's no `libz.so.1`
+  dependency, and the verify step skips `ldd` (it can't run the ARM loader on x64).
 
 Trigger manually from the **Actions** tab (`Build Linux ARM libcvextern` →
 `Run workflow`), or push a tag matching `opencv-v*` to build + attach to a release.
 Artifacts are downloadable from the workflow run page for 30 days.
 
-The workflow uses BuildKit's GitHub Actions cache (`type=gha`) to persist the ccache
-data set up in the Dockerfiles, so subsequent runs that don't touch source rebuild
-in 5-15 min per arch.
+All Linux builds compile only the `cvextern` target and skip Emgu's HDF5 step: Emgu's `full`
+profile otherwise builds HDF5 (unused - `WITH_HDF5=OFF`) and its C# projects, NuGet packages
+and examples via `--target package`.
 
 ### Windows x64 build via native MSVC (`build-windows.ps1`)
 
@@ -154,9 +162,8 @@ docker buildx build --platform linux/arm64 \
     -f Dockerfile.arm64 \
     --output type=local,dest=./out/linux-arm64 .
 
-# armhf
-docker run --privileged --rm tonistiigi/binfmt --install arm
-docker buildx build --platform linux/arm/v7 \
+# armhf (cross-compiled in an x64 container — no QEMU)
+docker buildx build --platform linux/amd64 \
     -f Dockerfile.armhf \
     --output type=local,dest=./out/linux-arm .
 ```
@@ -359,7 +366,7 @@ done
 | --------------------- | ---------------------------------------------------------------------------------- |
 | `Dockerfile.x64`      | Debian Buster Docker build for linux-x64; produces `libcvextern.so` (glibc 2.28 floor). |
 | `Dockerfile.arm64`    | Debian Buster Docker build for linux-arm64; produces `libcvextern.so` (glibc 2.28 floor). |
-| `Dockerfile.armhf`    | Debian Buster Docker build for linux-arm (armv7); produces `libcvextern.so` (glibc 2.28 floor). |
+| `Dockerfile.armhf`    | Debian Buster x64 Docker image cross-compiling linux-arm (armv7 hard-float) with Debian's armhf toolchain; produces `libcvextern.so` (glibc 2.28 floor). |
 | `build.ps1`           | Orchestrator for Linux Docker builds. PowerShell. Use this on Windows.             |
 | `build.sh`            | Orchestrator for Linux Docker builds. Bash. Use this on Linux / macOS / WSL.       |
 | `build-windows.ps1`   | Orchestrator for the native Windows x64 build (MSVC + cmake). PowerShell.          |
@@ -422,24 +429,12 @@ The workflow caches the full emgucv source tree (including submodules) under the
 
 The workflow grants `contents: write` so `softprops/action-gh-release` can create the release and upload assets. All other permissions remain at their read-only defaults.
 
-#### Linux / Windows CI (future)
+#### Linux / Windows CI
 
-The Linux Docker builds and Windows MSVC build don't have a CI workflow yet. When added, the sketch would be:
+| Workflow | Runner | Builds |
+| -------- | ------ | ------ |
+| `build-linux-x64.yml` | `ubuntu-24.04` | `Dockerfile.x64` (the Buster base sets the glibc 2.28 floor, not the host) |
+| `build-linux-arm.yml` | `ubuntu-22.04-arm` / `ubuntu-24.04` | `Dockerfile.arm64` natively; `Dockerfile.armhf` cross-compiled on x64 |
+| `build-windows.yml` | `windows-2022` | `build-windows.ps1` |
 
-```yaml
-jobs:
-  linux-x64:
-    runs-on: ubuntu-22.04        # Docker base (Buster) controls the glibc 2.28 floor, not the host
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - run: docker buildx build --platform linux/amd64 -f Dockerfile.x64 --output type=local,dest=./out/linux-x64 .
-      - uses: actions/upload-artifact@v4
-        with: { name: linux-x64, path: out/linux-x64/libcvextern.so }
-  linux-arm64:
-    runs-on: ubuntu-22.04-arm   # native arm64 runner — 4-10x faster than QEMU
-    steps: ...                  # mirror with Dockerfile.arm64
-  linux-armhf:
-    runs-on: ubuntu-22.04       # QEMU emulation (no native armhf runner available)
-    steps: ...                  # mirror with Dockerfile.armhf + tonistiigi/binfmt --install arm
-```
+All of them run on `workflow_dispatch` and on `opencv-v*` tag pushes (attaching their zips to the release).

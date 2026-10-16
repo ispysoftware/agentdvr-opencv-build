@@ -245,15 +245,28 @@ RUN if [ "${PORTABLE}" = "1" ]; then \
       echo "AgentDVR-minimal build: BUILD_LIST applied; unused features disabled; Feature2D stubs forward-decl'd; cuda throws neutralized." ; \
     fi
 
+# Build only what AgentDVR ships. Emgu's `full` profile first compiles HDF5 from source (we
+# build with WITH_HDF5=OFF, so it's never used) and ends with `cmake --build ... --target
+# package`, which also builds Emgu's C# projects, NuGet packages and examples - some of which
+# fail, and those failures were masked. Delete the HDF5 block and build just `cvextern` (the
+# Windows/macOS scripts already do). The grep fails the build if Emgu's script layout changes.
+RUN sed -i '/^ *cd hdf5$/,/^ *cd \.\.\/\.\.$/d' cmake_configure \
+ && sed -i 's|--target package|--target cvextern|' cmake_configure \
+ && if grep -q 'cd hdf5' cmake_configure || ! grep -q -- '--target cvextern' cmake_configure ; then \
+      echo "ERROR: cmake_configure layout changed - HDF5 skip / cvextern target sed did not apply" ; exit 1 ; \
+    fi
+
 # Run configure (which also kicks off `make`). MAKEFLAGS must be set inside RUN so $(nproc) expands.
 # Tee full output to /tmp/emgu_build.log AND stdout so CI captures everything.
+# bash -e: with only cvextern left the script should succeed end to end, so a failing command
+# now stops the build (the script's own `#!/bin/bash -ve` is ignored when run via `bash`).
 # ccache is installed and on PATH but no persistent mount — would only help on
 # local iterative builds, which aren't the expected usage pattern.
 RUN if [ -n "${JOBS}" ]; then PARALLEL="${JOBS}"; else PARALLEL="$(nproc)"; fi; \
     sed -i "s|--parallel 1|--parallel ${PARALLEL}|g" cmake_configure; \
     export MAKEFLAGS="-j${PARALLEL}"; \
     echo "Building with PARALLEL=${PARALLEL}"; \
-    bash ./cmake_configure ${BUILD_TYPE} 2>&1 | tee /tmp/emgu_build.log ; \
+    bash -e ./cmake_configure ${BUILD_TYPE} 2>&1 | tee /tmp/emgu_build.log ; \
     BUILD_RC=$? ; \
     if [ "$BUILD_RC" != "0" ]; then \
       echo "" >&2 ; \

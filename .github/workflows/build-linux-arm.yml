@@ -1,11 +1,11 @@
-# Build libcvextern.so for linux-arm64 and linux-arm (armhf/armv7) on GitHub's
-# free ARM hosted runners. Avoids QEMU emulation entirely — arm64 builds run
-# natively on the runner's ARM CPU, and armhf builds run via the CPU's aarch32
-# user-mode execution support (also native, no emulation).
+# Build libcvextern.so for linux-arm64 and linux-arm (armhf/armv7) with no emulation:
+#   arm64  builds natively on GitHub's ARM hosted runner (ubuntu-22.04-arm).
+#   armhf  is CROSS-COMPILED on a standard x64 runner with Debian Buster's armhf cross
+#          toolchain (see Dockerfile.armhf). It used to run as a linux/arm/v7 container on
+#          the ARM runner, but those CPUs can't execute 32-bit ARM, so it ran under QEMU
+#          (~5x slower; ~145 min against ~10 for arm64).
 #
-# Typical run time:
-#   arm64  ~45-75 min  (vs 2-6 h via QEMU on x64)
-#   armhf  ~60-90 min  (vs 3-8 h via QEMU on x64)
+# Typical run time: ~10-15 min per arch.
 #
 # Triggers:
 #   * workflow_dispatch -- manual run from the Actions tab.
@@ -70,8 +70,8 @@ jobs:
 
   build:
     needs: resolve-tag
-    runs-on: ubuntu-22.04-arm
-    timeout-minutes: 240   # 4 hours hard limit; typical run is 45-90 min per arch.
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90   # typical run is ~10-15 min per arch.
 
     strategy:
       fail-fast: false   # one arch failing shouldn't kill the other
@@ -80,11 +80,14 @@ jobs:
           - arch: arm64
             dockerfile: Dockerfile.arm64
             platform: linux/arm64
+            runner: ubuntu-22.04-arm
             outdir: linux-arm64
             enabled: ${{ github.event.inputs.arch == 'both' || github.event.inputs.arch == 'arm64' || github.event_name == 'push' }}
+          # Cross-compiled: the build container is x64 (linux/amd64) on an x64 runner.
           - arch: armhf
             dockerfile: Dockerfile.armhf
-            platform: linux/arm/v7
+            platform: linux/amd64
+            runner: ubuntu-24.04
             outdir: linux-arm
             enabled: ${{ github.event.inputs.arch == 'both' || github.event.inputs.arch == 'armhf' || github.event_name == 'push' }}
 
@@ -99,16 +102,8 @@ jobs:
         if: ${{ matrix.enabled == true || matrix.enabled == 'true' }}
         uses: actions/checkout@v4
 
-      # binfmt registration is needed for armhf (the runner is arm64; aarch32 user
-      # mode usually works natively but the binfmt handlers must still be registered
-      # so Docker knows which interpreter to use for linux/arm/v7 images).
-      # For pure arm64 builds this is a near-instant no-op.
-      - name: Set up QEMU / binfmt
-        if: ${{ matrix.enabled == true || matrix.enabled == 'true' }}
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm,arm64
-
+      # No QEMU/binfmt step: each container matches its runner's architecture (arm64 on the
+      # ARM runner, the armhf cross-build's amd64 container on the x64 runner).
       - name: Set up Docker Buildx
         if: ${{ matrix.enabled == true || matrix.enabled == 'true' }}
         uses: docker/setup-buildx-action@v3
