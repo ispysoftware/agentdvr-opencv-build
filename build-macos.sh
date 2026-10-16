@@ -328,6 +328,10 @@ build_arch() {
             if [ "$cmake_arch" = "x86_64" ]; then
                 echo 'set(CPU_BASELINE "SSE4_2" CACHE STRING "")'
                 echo 'set(CPU_DISPATCH "AVX;FP16;AVX2;AVX_512F;AVX512_SKX" CACHE STRING "")'
+                # OpenCV 5 enables the KleidiCV Arm HAL from CMAKE_SYSTEM_PROCESSOR, which is the
+                # build host's - so cross-compiling x86_64 on an Apple Silicon runner switches it on
+                # and its NEON sources fail ("unknown target CPU 'armv8-a'"). Arm-only; off for x64.
+                echo 'set(WITH_KLEIDICV OFF CACHE BOOL "")'
             fi
         fi
     } > "$init_cache"
