@@ -16,6 +16,9 @@
 //----------------------------------------------------------------------------
 
 #include "imgproc_c.h"
+// OpenCV 5 moved approxPolyDP / arcLength / boundingRect out of imgproc into the geometry
+// module (imgproc depends on it, so it is always built with imgproc).
+#include "opencv2/geometry.hpp"
 
 // Writes the boxes (in contour order, the order the managed path visited them) into
 // boxes[0..maxBoxes) and returns how many there are; a result above maxBoxes means the
