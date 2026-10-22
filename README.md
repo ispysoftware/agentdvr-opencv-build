@@ -333,7 +333,10 @@ Some exports in our cvextern are not Emgu's: Agent calls them directly with its 
 
 | Export | File | Used by |
 | --- | --- | --- |
-| `cveAgentResizeI420Region` | `patches/agentdvr_resize_c.cpp` | `YuvResizer.ResizeRegionInto` - crop + scale an I420 region into another, three `cv::resize` calls on stack `cv::Mat` headers. Replaces 12 Mat/InputArray wrappers and ~35 P/Invokes per compositor tile through Emgu's API. |
+| `cveAgentResizeI420Region` | `patches/agentdvr_resize_c.cpp` | `YuvResizer.ResizeRegionInto` and `Processing.ResizePlanes` - crop + scale an I420 region (or whole frame) into another, three `cv::resize` calls on stack `cv::Mat` headers. Replaces 12 Mat/InputArray wrappers and ~35 P/Invokes per call through Emgu's API. |
+| `cveAgentFindMotionBoxes` | `patches/agentdvr_motion_c.cpp` | `TrackerBase.FindNewTrackedObjects` - Canny + external contours + approxPolyDP + boundingRect + size filter on the foreground mask, boxes written to a caller buffer. Replaces a VectorOfPoint and ~4 wrapped calls per contour (50-200 contours per tick on a noisy mask). |
+
+To add one: drop a new `patches/agentdvr_<name>_c.cpp` in (the scripts copy every `agentdvr_*.cpp`) and add its symbol to the export checks in `build-windows.ps1`, `build-macos.sh` and the three Dockerfiles.
 
 Agent checks for each export at runtime and falls back to the Emgu path when an older cvextern doesn't have it, so the managed Emgu.CV package version is unaffected. The additions use Emgu's `CVAPI` / `CVAPI_CATCH_CV_ERRORS_VOID` conventions, so `CvInvoke.CheckError()` reports their errors like any other call.
 

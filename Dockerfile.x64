@@ -247,9 +247,9 @@ RUN if [ "${PORTABLE}" = "1" ]; then \
 
 # AgentDVR additions: extra exports Agent calls directly - not size cuts, so applied with or
 # without PORTABLE. Emgu globs Emgu.CV.Extern/imgproc/*.cpp into cvextern, so copying is enough.
-#   agentdvr_resize_c.cpp: cveAgentResizeI420Region (compositor tile resize, one call per tile)
-RUN cp /patches/agentdvr_resize_c.cpp /work/emgucv/Emgu.CV.Extern/imgproc/agentdvr_resize_c.cpp \
- && echo "Added Emgu.CV.Extern/imgproc/agentdvr_resize_c.cpp"
+# Every patches/agentdvr_*.cpp goes in; the README lists what each one exports.
+RUN cp /patches/agentdvr_*.cpp /work/emgucv/Emgu.CV.Extern/imgproc/ \
+ && ls /work/emgucv/Emgu.CV.Extern/imgproc/agentdvr_*.cpp
 
 # Build only what AgentDVR ships. Emgu's `full` profile first compiles HDF5 from source (we
 # build with WITH_HDF5=OFF, so it's never used) and ends with `cmake --build ... --target
@@ -362,10 +362,12 @@ RUN set -e ; \
     fi ; \
     echo "(cveImread exported)" ; \
     # AgentDVR additions (patches/agentdvr_*.cpp). \
-    if ! grep -qw cveAgentResizeI420Region /tmp/defsyms.txt ; then \
-      echo "!!! ERROR: libcvextern.so does not export cveAgentResizeI420Region (patches/agentdvr_resize_c.cpp not compiled in)" ; exit 1 ; \
-    fi ; \
-    echo "(cveAgentResizeI420Region exported)"
+    for sym in cveAgentResizeI420Region cveAgentFindMotionBoxes ; do \
+      if ! grep -qw "$sym" /tmp/defsyms.txt ; then \
+        echo "!!! ERROR: libcvextern.so does not export $sym (a patches/agentdvr_*.cpp file was not compiled in)" ; exit 1 ; \
+      fi ; \
+      echo "($sym exported)" ; \
+    done
 
 # ---- Export stage (scratch image holding only the artifact) ---------------
 FROM scratch AS export

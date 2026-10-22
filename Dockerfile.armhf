@@ -145,8 +145,8 @@ RUN if [ "${PORTABLE}" = "1" ]; then \
     fi
 
 # AgentDVR additions - see Dockerfile.x64.
-RUN cp /patches/agentdvr_resize_c.cpp /work/emgucv/Emgu.CV.Extern/imgproc/agentdvr_resize_c.cpp \
- && echo "Added Emgu.CV.Extern/imgproc/agentdvr_resize_c.cpp"
+RUN cp /patches/agentdvr_*.cpp /work/emgucv/Emgu.CV.Extern/imgproc/ \
+ && ls /work/emgucv/Emgu.CV.Extern/imgproc/agentdvr_*.cpp
 
 # Build only what AgentDVR ships - see Dockerfile.x64 for the shared rationale: skip Emgu's HDF5
 # build and build the cvextern target instead of `package`. For the cross build this is required,
@@ -253,10 +253,12 @@ RUN set -e ; \
     fi ; \
     echo "(cveImread exported)" ; \
     # AgentDVR additions (patches/agentdvr_*.cpp). \
-    if ! grep -qw cveAgentResizeI420Region /tmp/defsyms.txt ; then \
-      echo "!!! ERROR: libcvextern.so does not export cveAgentResizeI420Region (patches/agentdvr_resize_c.cpp not compiled in)" ; exit 1 ; \
-    fi ; \
-    echo "(cveAgentResizeI420Region exported)"
+    for sym in cveAgentResizeI420Region cveAgentFindMotionBoxes ; do \
+      if ! grep -qw "$sym" /tmp/defsyms.txt ; then \
+        echo "!!! ERROR: libcvextern.so does not export $sym (a patches/agentdvr_*.cpp file was not compiled in)" ; exit 1 ; \
+      fi ; \
+      echo "($sym exported)" ; \
+    done
 
 FROM scratch AS export
 COPY --from=builder /work/emgucv/libs/runtimes/linux-arm/native/libcvextern.so /libcvextern.so
