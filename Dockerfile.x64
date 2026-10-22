@@ -245,6 +245,12 @@ RUN if [ "${PORTABLE}" = "1" ]; then \
       echo "AgentDVR-minimal build: BUILD_LIST applied; unused features disabled; Feature2D stubs forward-decl'd; cuda throws neutralized." ; \
     fi
 
+# AgentDVR additions: extra exports Agent calls directly - not size cuts, so applied with or
+# without PORTABLE. Emgu globs Emgu.CV.Extern/imgproc/*.cpp into cvextern, so copying is enough.
+#   agentdvr_resize_c.cpp: cveAgentResizeI420Region (compositor tile resize, one call per tile)
+RUN cp /patches/agentdvr_resize_c.cpp /work/emgucv/Emgu.CV.Extern/imgproc/agentdvr_resize_c.cpp \
+ && echo "Added Emgu.CV.Extern/imgproc/agentdvr_resize_c.cpp"
+
 # Build only what AgentDVR ships. Emgu's `full` profile first compiles HDF5 from source (we
 # build with WITH_HDF5=OFF, so it's never used) and ends with `cmake --build ... --target
 # package`, which also builds Emgu's C# projects, NuGet packages and examples - some of which
@@ -354,7 +360,12 @@ RUN set -e ; \
     if ! grep -qw cveImread /tmp/defsyms.txt ; then \
       echo "!!! ERROR: libcvextern.so does not export cveImread (imgcodecs wrapper missing)" ; exit 1 ; \
     fi ; \
-    echo "(cveImread exported)"
+    echo "(cveImread exported)" ; \
+    # AgentDVR additions (patches/agentdvr_*.cpp). \
+    if ! grep -qw cveAgentResizeI420Region /tmp/defsyms.txt ; then \
+      echo "!!! ERROR: libcvextern.so does not export cveAgentResizeI420Region (patches/agentdvr_resize_c.cpp not compiled in)" ; exit 1 ; \
+    fi ; \
+    echo "(cveAgentResizeI420Region exported)"
 
 # ---- Export stage (scratch image holding only the artifact) ---------------
 FROM scratch AS export

@@ -255,6 +255,13 @@ if ($Portable) {
     Write-Ok "Patches applied."
 }
 
+# ---- AgentDVR additions --------------------------------------------------
+# Extra exports Agent calls directly - not size cuts, so applied with or without -Portable.
+# Emgu globs Emgu.CV.Extern/imgproc/*.cpp into cvextern, so dropping the file in is enough.
+#   agentdvr_resize_c.cpp: cveAgentResizeI420Region (compositor tile resize, one call per tile)
+Copy-Item -Force (Join-Path $scriptDir 'patches/agentdvr_resize_c.cpp') (Join-Path $srcDir 'Emgu.CV.Extern/imgproc/agentdvr_resize_c.cpp')
+Write-Host "  Added Emgu.CV.Extern/imgproc/agentdvr_resize_c.cpp"
+
 # ---- Configure -----------------------------------------------------------
 Write-Section "cmake configure (VS $VsVersion / x64)"
 
@@ -507,6 +514,26 @@ if (Get-Command dumpbin -ErrorAction SilentlyContinue) {
     }
     Write-Host "cveImread exported (imgcodecs wrapper present)"
 }
+
+# AgentDVR additions must be exported. Checked without dumpbin (usually not on PATH): map the
+# DLL without running DllMain or resolving its imports, then look the symbol up.
+if (-not ('AgentBuild.Native' -as [type])) {   # already defined on a re-run in the same session
+    Add-Type -Namespace AgentBuild -Name Native -MemberDefinition @'
+[DllImport("kernel32", SetLastError = true, CharSet = CharSet.Unicode)] public static extern IntPtr LoadLibraryEx(string path, IntPtr file, uint flags);
+[DllImport("kernel32", CharSet = CharSet.Ansi)] public static extern IntPtr GetProcAddress(IntPtr module, string name);
+[DllImport("kernel32")] public static extern bool FreeLibrary(IntPtr module);
+'@
+}
+$mod = [AgentBuild.Native]::LoadLibraryEx($finalDll, [IntPtr]::Zero, 0x1) # DONT_RESOLVE_DLL_REFERENCES
+if ($mod -eq [IntPtr]::Zero) { Die "Could not map $finalDll to check its exports." }
+try {
+    foreach ($sym in @('cveAgentResizeI420Region')) {
+        if ([AgentBuild.Native]::GetProcAddress($mod, $sym) -eq [IntPtr]::Zero) {
+            Die "cvextern.dll does not export $sym -- patches/agentdvr_resize_c.cpp was not compiled in."
+        }
+        Write-Host "$sym exported (AgentDVR addition)"
+    }
+} finally { [void][AgentBuild.Native]::FreeLibrary($mod) }
 
 # ---- Zip -----------------------------------------------------------------
 if (-not $SkipZip) {

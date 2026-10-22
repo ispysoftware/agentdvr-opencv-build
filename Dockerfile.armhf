@@ -144,6 +144,10 @@ RUN if [ "${PORTABLE}" = "1" ]; then \
       echo "ERROR: Dockerfile.armhf cross-compiles and only supports PORTABLE=1 (the toolchain is injected with the portable flags)." ; exit 1 ; \
     fi
 
+# AgentDVR additions - see Dockerfile.x64.
+RUN cp /patches/agentdvr_resize_c.cpp /work/emgucv/Emgu.CV.Extern/imgproc/agentdvr_resize_c.cpp \
+ && echo "Added Emgu.CV.Extern/imgproc/agentdvr_resize_c.cpp"
+
 # Build only what AgentDVR ships - see Dockerfile.x64 for the shared rationale: skip Emgu's HDF5
 # build and build the cvextern target instead of `package`. For the cross build this is required,
 # not just faster: HDF5's configure runs test programs (try_run) that can't execute here, and the
@@ -247,7 +251,12 @@ RUN set -e ; \
     if ! grep -qw cveImread /tmp/defsyms.txt ; then \
       echo "!!! ERROR: libcvextern.so does not export cveImread (imgcodecs wrapper missing)" ; exit 1 ; \
     fi ; \
-    echo "(cveImread exported)"
+    echo "(cveImread exported)" ; \
+    # AgentDVR additions (patches/agentdvr_*.cpp). \
+    if ! grep -qw cveAgentResizeI420Region /tmp/defsyms.txt ; then \
+      echo "!!! ERROR: libcvextern.so does not export cveAgentResizeI420Region (patches/agentdvr_resize_c.cpp not compiled in)" ; exit 1 ; \
+    fi ; \
+    echo "(cveAgentResizeI420Region exported)"
 
 FROM scratch AS export
 COPY --from=builder /work/emgucv/libs/runtimes/linux-arm/native/libcvextern.so /libcvextern.so

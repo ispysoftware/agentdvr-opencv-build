@@ -194,6 +194,13 @@ if [ "$PORTABLE" = "1" ]; then
     ok "Patches applied."
 fi
 
+# ---- AgentDVR additions --------------------------------------------------
+# Extra exports Agent calls directly - not size cuts, so applied with or without PORTABLE.
+# Emgu globs Emgu.CV.Extern/imgproc/*.cpp into cvextern, so copying the file in is enough.
+#   agentdvr_resize_c.cpp: cveAgentResizeI420Region (compositor tile resize, one call per tile)
+cp "$PATCHES_DIR/agentdvr_resize_c.cpp" "$SRC_DIR/Emgu.CV.Extern/imgproc/agentdvr_resize_c.cpp"
+echo "  Added Emgu.CV.Extern/imgproc/agentdvr_resize_c.cpp"
+
 # ---- Build helper --------------------------------------------------------
 build_arch() {
     local logical_arch="$1"     # x64 or arm64 (Emgu's naming)
@@ -422,6 +429,11 @@ build_arch() {
         fail "libcvextern.dylib does not export cveImread (imgcodecs wrapper missing)."
     fi
     ok "cveImread exported."
+    # AgentDVR additions (patches/agentdvr_*.cpp).
+    if ! grep -qw '_cveAgentResizeI420Region' "$defsyms"; then
+        fail "libcvextern.dylib does not export cveAgentResizeI420Region (patches/agentdvr_resize_c.cpp not compiled in)."
+    fi
+    ok "cveAgentResizeI420Region exported."
 
     # Copy to output
     local arch_out_dir="$OUT_DIR/macos-$logical_arch"

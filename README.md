@@ -327,6 +327,16 @@ The Linux and macOS builds apply the same no-op to **OpenCV's own** `throw_no_cu
 
 For AgentDVR's case this only matters if something is calling a cuda function *without* checking `HasCuda` first. The proper long-term fix is to find that unguarded call site in AgentDVR's code and add the `if (CudaInvoke.HasCuda) { ... }` guard. Use a stack trace from the runtime failure to locate it.
 
+## AgentDVR additions to cvextern
+
+Some exports in our cvextern are not Emgu's: Agent calls them directly with its own `DllImport`, for hot paths where Emgu's managed wrappers cost more than the work. They live in `patches/agentdvr_*.cpp`. Every build (all six RIDs, with or without the portable patches) copies them into `Emgu.CV.Extern/imgproc/`, which Emgu's CMakeLists globs, so no CMake changes are needed. Each build's verify step fails if an addition isn't exported.
+
+| Export | File | Used by |
+| --- | --- | --- |
+| `cveAgentResizeI420Region` | `patches/agentdvr_resize_c.cpp` | `YuvResizer.ResizeRegionInto` - crop + scale an I420 region into another, three `cv::resize` calls on stack `cv::Mat` headers. Replaces 12 Mat/InputArray wrappers and ~35 P/Invokes per compositor tile through Emgu's API. |
+
+Agent checks for each export at runtime and falls back to the Emgu path when an older cvextern doesn't have it, so the managed Emgu.CV package version is unaffected. The additions use Emgu's `CVAPI` / `CVAPI_CATCH_CV_ERRORS_VOID` conventions, so `CvInvoke.CheckError()` reports their errors like any other call.
+
 ### Disabling the strip
 
 If you ever need a feature back (rebuilt AgentDVR uses YOLO via cv::dnn, say, or you want to ship a CUDA-enabled build), set `-Portable:$false` (PowerShell) or `PORTABLE=0 ./build.sh` (bash). That restores Emgu's stock "full" configure — every module enabled, every dep present.
@@ -371,7 +381,7 @@ done
 | `build.sh`            | Orchestrator for Linux Docker builds. Bash. Use this on Linux / macOS / WSL.       |
 | `build-windows.ps1`   | Orchestrator for the native Windows x64 build (MSVC + cmake). PowerShell.          |
 | `build-macos.sh`      | Orchestrator for macOS x64 and arm64 builds (Xcode CLT + cmake). Bash.             |
-| `patches/`            | Stub files applied during the Docker build (core_cuda_c.cpp safe stub etc.).       |
+| `patches/`            | Files applied during every build: the core_cuda_c.cpp safe stub, plus the AgentDVR additions (`agentdvr_*.cpp`, see above). |
 | `.github/workflows/build-macos.yml` | GitHub Actions workflow for macOS x64 + arm64 builds. Triggers on `workflow_dispatch` (manual) and `push` on `opencv-v*` tags. |
 | `out/`                | Created at build time. Holds extracted `.so` / `.dll` / `.dylib` files and build logs. Gitignored. |
 
